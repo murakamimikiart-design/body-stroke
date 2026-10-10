@@ -87,6 +87,8 @@
 
 <div class="controls">
   <button id="rec" class="primary" disabled>● 記録スタート</button>
+  <button id="loadVideo">🎞 動画から読み込む</button>
+  <input id="videoFile" type="file" accept="video/*" hidden>
   <label>秒数 <input id="dur" type="number" min="1" max="30" value="5" style="width:52px"></label>
   <button id="replay" disabled>▶ 再生</button>
   <button id="savePng" disabled>PNG保存</button>
@@ -221,6 +223,7 @@ function speedToAlpha(v, max = 1) {
   return max - (max - min) * speedRatio(v);
 }
 const COUNTDOWN_SEC = 3;
+const JUMP_BREAK = 0.15; // 1フレームでこれ以上（画面の高さに対する割合）動いたら線を切る
 
 
 // ── 要素 ──────────────────────────────────────────────
@@ -236,7 +239,9 @@ const btnPng  = document.getElementById('savePng');
 const btnJson = document.getElementById('saveJson');
 
 // ── 状態 ──────────────────────────────────────────────
-let phase = 'idle';      // idle | countdown | recording
+let phase = 'idle';      // idle | countdown | recording | analyzing
+let source = 'camera';   // camera | video（いま何を入力にしているか）
+let cameraReady = false;
 let recStart = 0, recDurationMs = 5000, countdownEnd = 0;
 let frames = [];         // [{t, hands: {L: [{x,y,z}x5] | null, R: ...}, face: [瞳x2] | null, mouth: {outer, inner} | null, arms: [肩・ひじ・手首 x6] | null, palms: {L: [手のひら x6] | null, R: ...}, fingerBones: {L: [指の関節 x20] | null, R: ...}}]
 
@@ -253,12 +258,18 @@ holistic.setOptions({
 holistic.onResults(onResults);
 
 // 指定した点だけ取り出し、表示に合わせて左右反転（x → 1-x）
-function pick(lm, points) {
+// カメラは鏡のように左右反転して表示・記録する。動画ファイルは反転しない
+let mirrorX = true;
+const mx = x => mirrorX ? 1 - x : x;
+
+// checkVisibility: 体（Pose）の点だけ「見えている度合い」で選ぶ
+// （Tasks の手・顔の点は visibility が常に 0 なので、そちらでは使わない）
+function pick(lm, points, checkVisibility = false) {
   if (!lm) return null;
   return points.map(f => {
     const p = lm[f.idx];
-    if (!p || (p.visibility !== undefined && p.visibility < MIN_VISIBILITY)) return null;
-    return { x: 1 - p.x, y: p.y, z: p.z };
+    if (!p || (checkVisibility && p.visibility < MIN_VISIBILITY)) return null;
+    return { x: mx(p.x), y: p.y, z: p.z };
   });
 }
 
@@ -275,13 +286,13 @@ function updateLiveSpeed(side, hand, t) {
 
 function mouthShape(face) {
   if (!face) return null;
-  const ring = idx => idx.map(i => ({ x: 1 - face[i].x, y: face[i].y }));
+  const ring = idx => idx.map(i => ({ x: mx(face[i].x), y: face[i].y }));
   return { outer: ring(LIP_OUTER), inner: ring(LIP_INNER) };
 }
 
 // カメラ映像の縦横比に合わせてキャンバスの大きさを変える（スマホの縦向きカメラ対策）
 function fitCanvasesTo(img) {
-  const iw = img.width, ih = img.height;
+  const iw = img.videoWidth || img.width, ih = img.videoHeight || img.height;
   if (!iw || !ih || phase === 'recording') return;
   const scale = 640 / Math.max(iw, ih);
   const w = Math.round(iw * scale), h = Math.round(ih * scale);
@@ -294,11 +305,50 @@ function fitCanvasesTo(img) {
 }
 
 function onResults(results) {
+  if (source !== 'camera') return; // 動画を解析しているあいだはカメラの結果を使わない
   fitCanvasesTo(results.image);
+  const parts = renderPreview(results);
+  const now = performance.now();
+
+  if (phase === 'countdown') {
+    const remain = Math.ceil((countdownEnd - now) / 1000);
+    if (remain > 0) {
+      overlayText(String(remain), 160);
+    } else {
+      phase = 'recording'; recStart = now; frames = [];
+      clearArt();
+    }
+  }
+
+  if (phase === 'recording') {
+    const t = now - recStart;
+    frames.push(buildFrame(Math.round(t), parts));
+    drawStrokes(frames);  // ライブで描画
+    const left = Math.max(0, (recDurationMs - t) / 1000);
+    overlayText('● REC ' + left.toFixed(1) + 's', 36, 'top');
+    progressBar(t / recDurationMs);
+    if (t >= recDurationMs) finishRecording();
+  }
+}
+
+// 検出結果から、記録する1フレーム分のデータを作る
+function buildFrame(t, { realLeft, realRight, face, pose }) {
+  return {
+    t,
+    hands: { L: pick(realLeft, FINGERS), R: pick(realRight, FINGERS) },
+    face: pick(face, FACE_POINTS), mouth: mouthShape(face), arms: pick(pose, ARM_POINTS, true),
+    palms: { L: pick(realLeft, PALM_POINTS), R: pick(realRight, PALM_POINTS) },
+    fingerBones: { L: pick(realLeft, FINGER_BONE_POINTS), R: pick(realRight, FINGER_BONE_POINTS) },
+  };
+}
+
+// 映像と検出結果（骨組み・指先の丸など）を左の画面に描き、左右を読み替えた結果を返す
+// results は Holistic と同じ形 { image, leftHandLandmarks, rightHandLandmarks, faceLandmarks, poseLandmarks }
+function renderPreview(results) {
   const W = cam.width, H = cam.height;
   camCtx.save();
   camCtx.clearRect(0, 0, W, H);
-  camCtx.translate(W, 0); camCtx.scale(-1, 1);
+  if (mirrorX) { camCtx.translate(W, 0); camCtx.scale(-1, 1); }
   camCtx.drawImage(results.image, 0, 0, W, H);
   camCtx.restore();
 
@@ -309,7 +359,7 @@ function onResults(results) {
   const pose      = results.poseLandmarks      || null;
 
   camCtx.save();
-  camCtx.translate(W, 0); camCtx.scale(-1, 1);
+  if (mirrorX) { camCtx.translate(W, 0); camCtx.scale(-1, 1); }
   const nowT = performance.now();
   [['L', realLeft], ['R', realRight]].forEach(([side, hand]) => {
     if (!hand) { liveSpeed[side] = null; return; }
@@ -368,30 +418,7 @@ function onResults(results) {
     });
   }
   camCtx.restore();
-
-  const now = performance.now();
-
-  if (phase === 'countdown') {
-    const remain = Math.ceil((countdownEnd - now) / 1000);
-    if (remain > 0) {
-      overlayText(String(remain), 160);
-    } else {
-      phase = 'recording'; recStart = now; frames = [];
-      clearArt();
-    }
-  }
-
-  if (phase === 'recording') {
-    const t = now - recStart;
-    frames.push({ t: Math.round(t), hands: { L: pick(realLeft, FINGERS), R: pick(realRight, FINGERS) }, face: pick(face, FACE_POINTS), mouth: mouthShape(face), arms: pick(pose, ARM_POINTS),
-      palms: { L: pick(realLeft, PALM_POINTS), R: pick(realRight, PALM_POINTS) },
-      fingerBones: { L: pick(realLeft, FINGER_BONE_POINTS), R: pick(realRight, FINGER_BONE_POINTS) } });
-    drawStrokes(frames);  // ライブで描画
-    const left = Math.max(0, (recDurationMs - t) / 1000);
-    overlayText('● REC ' + left.toFixed(1) + 's', 36, 'top');
-    progressBar(t / recDurationMs);
-    if (t >= recDurationMs) finishRecording();
-  }
+  return { realLeft, realRight, face, pose };
 }
 
 function overlayText(txt, size, pos = 'center') {
@@ -499,8 +526,12 @@ function drawTrack(tr, fs, ctx) {
   const segs = []; let cur = [];
   for (const fr of fs) {
     const p = tr.get(fr);
-    if (p) cur.push({ x: p.x * W, y: p.y * H, t: fr.t });
-    else if (cur.length) { segs.push(cur); cur = []; }
+    if (!p) { if (cur.length) { segs.push(cur); cur = []; } continue; }
+    const q = { x: p.x * W, y: p.y * H, t: fr.t };
+    // 場面の切り替わりなどで位置が大きく飛んだら、線をつながない
+    const last = cur[cur.length - 1];
+    if (last && Math.hypot(q.x - last.x, q.y - last.y) / H > JUMP_BREAK) { segs.push(cur); cur = []; }
+    cur.push(q);
   }
   if (cur.length) segs.push(cur);
   ctx.strokeStyle = colorOf(tr.key);
@@ -590,6 +621,7 @@ const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 
 // ── 記録制御 ──────────────────────────────────────────
 btnRec.onclick = () => {
+  if (source === 'video') backToCamera();
   recDurationMs = Math.max(1, Math.min(30, +document.getElementById('dur').value || 5)) * 1000;
   phase = 'countdown';
   countdownEnd = performance.now() + COUNTDOWN_SEC * 1000;
@@ -607,7 +639,8 @@ function finishRecording() {
 }
 
 function setButtons(on) {
-  btnRec.disabled = !on;
+  btnRec.disabled = !on || !cameraReady;
+  btnVideo.disabled = !on;
   const has = on && frames.length > 0;
   btnReplay.disabled = !has; btnPng.disabled = !has; btnJson.disabled = !has;
 }
@@ -717,9 +750,147 @@ holistic.initialize().then(async () => {
     return;
   }
   await camera.start();
-  elStatus.textContent = '準備完了 — 「記録スタート」を押すと3秒後に5秒間記録します';
-  setButtons(true);
+  cameraReady = true;
+  if (phase === 'idle' && source === 'camera') {
+    elStatus.textContent = '準備完了 — 「記録スタート」を押すと3秒後に5秒間記録します';
+    setButtons(true);
+  }
 }).catch(err => { elStatus.textContent = 'エラー: ' + err.message; });
+
+// ── 動画から読み込む ──────────────────────────────────────
+// 動画では体が映っていない手や顔のアップも多いので、Holistic ではなく
+// 手・顔・体を別々に探す MediaPipe Tasks（HandLandmarker / FaceLandmarker / PoseLandmarker）を使う
+const TASKS_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models';
+const VIDEO_FPS = 30; // 動画を何コマ／秒で解析するか
+const btnVideo = document.getElementById('loadVideo');
+const elVideoFile = document.getElementById('videoFile');
+const fileVideo = document.createElement('video');
+fileVideo.muted = true; fileVideo.playsInline = true; fileVideo.preload = 'auto';
+
+let tasks = null;
+let tasksClock = 0; // detectForVideo のタイムスタンプは増え続ける必要があるので、動画をまたいで足していく
+
+async function loadTasks() {
+  if (tasks) return tasks;
+  // カメラ用の Holistic と Tasks は、どちらもグローバル変数 Module / ModuleFactory を使うのでぶつかる。
+  // Tasks を作るあいだだけ Holistic のものを退避して、作り終わったら戻す
+  const saved = { Module: window.Module, ModuleFactory: window.ModuleFactory };
+  window.Module = undefined; window.ModuleFactory = undefined;
+  try { return await createTasks(); }
+  finally { window.Module = saved.Module; window.ModuleFactory = saved.ModuleFactory; }
+}
+
+async function createTasks() {
+  const vision = await import(`${TASKS_URL}/vision_bundle.mjs`);
+  const fileset = await vision.FilesetResolver.forVisionTasks(`${TASKS_URL}/wasm`);
+  // GPU が使えない端末では CPU で動かす
+  const create = async (Cls, path, extra) => {
+    const opts = d => ({ baseOptions: { modelAssetPath: path, delegate: d }, runningMode: 'VIDEO', ...extra });
+    try { return await Cls.createFromOptions(fileset, opts('GPU')); }
+    catch { return await Cls.createFromOptions(fileset, opts('CPU')); }
+  };
+  const [hand, face, pose] = await Promise.all([
+    create(vision.HandLandmarker, `${MODEL_URL}/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`, { numHands: 2 }),
+    create(vision.FaceLandmarker, `${MODEL_URL}/face_landmarker/face_landmarker/float16/1/face_landmarker.task`, { numFaces: 1 }),
+    create(vision.PoseLandmarker, `${MODEL_URL}/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task`, { numPoses: 1 }),
+  ]);
+  tasks = { hand, face, pose };
+  return tasks;
+}
+
+function seekTo(v, time) {
+  return new Promise(resolve => {
+    const done = () => { clearTimeout(timer); v.removeEventListener('seeked', done); resolve(); };
+    const timer = setTimeout(done, 3000);
+    v.addEventListener('seeked', done);
+    v.currentTime = time;
+  });
+}
+
+// Tasks の結果を、Holistic と同じ形にそろえる（左右のラベルの扱いも Holistic と同じ）
+function toHolisticShape(image, handRes, faceRes, poseRes) {
+  const r = { image };
+  const labels = handRes.handedness || handRes.handednesses || [];
+  handRes.landmarks.forEach((lm, k) => {
+    const label = labels[k]?.[0]?.categoryName;
+    const slot = label === 'Left' ? 'leftHandLandmarks' : 'rightHandLandmarks';
+    if (!r[slot]) r[slot] = lm;
+    else r[slot === 'leftHandLandmarks' ? 'rightHandLandmarks' : 'leftHandLandmarks'] = lm;
+  });
+  r.faceLandmarks = faceRes.faceLandmarks?.[0] || null;
+  r.poseLandmarks = poseRes.landmarks?.[0] || null;
+  return r;
+}
+
+btnVideo.onclick = () => elVideoFile.click();
+elVideoFile.onchange = () => {
+  const file = elVideoFile.files[0];
+  elVideoFile.value = '';
+  if (file) analyzeVideo(file).catch(err => {
+    phase = 'idle';
+    elStatus.textContent = '動画の解析でエラー: ' + err.message;
+    setButtons(true);
+  });
+};
+
+async function analyzeVideo(file) {
+  setButtons(false);
+  source = 'video';
+  try { camera.stop(); } catch {}
+  elStatus.textContent = '解析の準備中…（初回はモデルの読み込みに少し時間がかかります）';
+  const t = await loadTasks();
+
+  if (fileVideo.src) URL.revokeObjectURL(fileVideo.src);
+  fileVideo.src = URL.createObjectURL(file);
+  await new Promise((resolve, reject) => {
+    fileVideo.onloadeddata = resolve;
+    fileVideo.onerror = () => reject(new Error('この動画は読み込めませんでした'));
+  });
+  const dur = fileVideo.duration;
+
+  mirrorX = false;
+  phase = 'idle';
+  fitCanvasesTo(fileVideo);
+  phase = 'analyzing';
+  frames = []; liveSpeed.L = liveSpeed.R = null;
+  recDurationMs = dur * 1000;
+  clearArt();
+
+  const total = Math.floor(dur * VIDEO_FPS) + 1;
+  for (let i = 0; i < total; i++) {
+    const time = Math.min(i / VIDEO_FPS, dur - 0.001);
+    await seekTo(fileVideo, time);
+    const ts = tasksClock + Math.round(time * 1000) + i; // 必ず増えるように
+    const results = toHolisticShape(fileVideo,
+      t.hand.detectForVideo(fileVideo, ts),
+      t.face.detectForVideo(fileVideo, ts),
+      t.pose.detectForVideo(fileVideo, ts));
+    const parts = renderPreview(results);
+    frames.push(buildFrame(Math.round(time * 1000), parts));
+    if (i % 5 === 0) drawStrokes(frames);
+    progressBar((i + 1) / total);
+    elStatus.textContent = `動画を解析中… ${Math.round((i + 1) / total * 100)}%（${(time).toFixed(1)} / ${dur.toFixed(1)} 秒）`;
+  }
+  tasksClock += Math.round(dur * 1000) + total + 1000;
+
+  phase = 'idle';
+  drawStrokes(frames);
+  const handN = frames.filter(f => f.hands.L || f.hands.R).length;
+  const faceN = frames.filter(f => f.face).length;
+  const armN  = frames.filter(f => f.arms?.some(Boolean)).length;
+  elStatus.textContent = `動画の解析完了：${frames.length} フレーム（手 ${handN} ／ 顔 ${faceN} ／ 肩・腕 ${armN}）— 「記録スタート」でカメラに戻ります`;
+  setButtons(true);
+}
+
+// 動画モードからカメラに戻る（動画から作った絵は消える）
+function backToCamera() {
+  source = 'camera';
+  mirrorX = true;
+  frames = []; liveSpeed.L = liveSpeed.R = null;
+  clearArt();
+  camera.start();
+}
 </script>
 </body>
 </html>
