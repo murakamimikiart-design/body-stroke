@@ -43,6 +43,17 @@
   .legend input[type=color]::-webkit-color-swatch { border: none; border-radius: 50%; }
   .legend button { font-size: 12px; padding: 4px 10px; }
   #video { display: none; }
+  .range-panel { margin-top: 12px; padding: 12px 16px; border-radius: 10px; background: #1a1e27;
+                 display: flex; flex-direction: column; gap: 10px; width: min(480px, 100%); }
+  .range-panel[hidden] { display: none; }
+  .range-title { font-weight: bold; font-size: 14px; }
+  .range-panel canvas { width: 100%; background: #000; }
+  .range-panel label { justify-content: space-between; }
+  .range-panel input[type=range] { flex: 1; height: 28px; }
+  .range-panel .val { min-width: 4.2em; text-align: right; color: #fff; font-variant-numeric: tabular-nums; }
+  .range-info { font-size: 13px; color: #cbd5e1; }
+  .range-buttons { display: flex; gap: 8px; }
+  .range-buttons button { flex: 1; }
   .tune { margin-top: 12px; display: flex; gap: 22px; flex-wrap: wrap; justify-content: center;
           padding: 10px 16px; border-radius: 10px; background: #1a1e27; }
   .tune label { gap: 8px; }
@@ -93,6 +104,17 @@
   <button id="replay" disabled>▶ 再生</button>
   <button id="savePng" disabled>PNG保存</button>
   <button id="saveJson" disabled>データ保存(JSON)</button>
+</div>
+<div id="rangePanel" class="range-panel" hidden>
+  <div class="range-title">解析する範囲を選ぶ</div>
+  <canvas id="rangePreview" width="320" height="180"></canvas>
+  <label>開始 <input id="rangeStart" type="range" min="0" max="1" step="0.1" value="0"><span class="val" id="rangeStartVal"></span></label>
+  <label>終了 <input id="rangeEnd" type="range" min="0" max="1" step="0.1" value="1"><span class="val" id="rangeEndVal"></span></label>
+  <div id="rangeInfo" class="range-info"></div>
+  <div class="range-buttons">
+    <button id="rangeGo" class="primary">▶ この範囲を解析</button>
+    <button id="rangeCancel">やめる</button>
+  </div>
 </div>
 <div class="tune">
   <label>指先の点の大きさ<small>（ゆっくり時）</small>
@@ -530,7 +552,7 @@ function drawTrack(tr, fs, ctx) {
     const q = { x: p.x * W, y: p.y * H, t: fr.t };
     // 場面の切り替わりなどで位置が大きく飛んだら、線をつながない
     const last = cur[cur.length - 1];
-    if (last && Math.hypot(q.x - last.x, q.y - last.y) / H > JUMP_BREAK) { segs.push(cur); cur = []; }
+    if (last && Math.hypot(q.x - last.x, q.y - last.y) / H > JUMP_BREAK * Math.max(1, (q.t - last.t) / 33)) { segs.push(cur); cur = []; }
     cur.push(q);
   }
   if (cur.length) segs.push(cur);
@@ -762,7 +784,8 @@ holistic.initialize().then(async () => {
 // 手・顔・体を別々に探す MediaPipe Tasks（HandLandmarker / FaceLandmarker / PoseLandmarker）を使う
 const TASKS_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models';
-const VIDEO_FPS = 30; // 動画を何コマ／秒で解析するか
+// 動画を何コマ／秒で解析するか（スマホは処理が遅いので間引く）
+const VIDEO_FPS = IS_TOUCH ? 15 : 30;
 const btnVideo = document.getElementById('loadVideo');
 const elVideoFile = document.getElementById('videoFile');
 const fileVideo = document.createElement('video');
@@ -827,20 +850,31 @@ btnVideo.onclick = () => elVideoFile.click();
 elVideoFile.onchange = () => {
   const file = elVideoFile.files[0];
   elVideoFile.value = '';
-  if (file) analyzeVideo(file).catch(err => {
-    phase = 'idle';
-    elStatus.textContent = '動画の解析でエラー: ' + err.message;
-    setButtons(true);
-  });
+  if (file) openVideo(file).catch(videoError);
 };
+function videoError(err) {
+  phase = 'idle';
+  elRangePanel.hidden = true;
+  elStatus.textContent = '動画の読み込み・解析でエラー: ' + err.message;
+  setButtons(true);
+}
 
-async function analyzeVideo(file) {
+// ── 解析する範囲を選ぶ ──
+const elRangePanel = document.getElementById('rangePanel');
+const elRangeStart = document.getElementById('rangeStart'), elRangeEnd = document.getElementById('rangeEnd');
+const elRangePreview = document.getElementById('rangePreview');
+const MIN_RANGE = 0.5; // 範囲の最短（秒）
+let tasksPromise = null;
+
+async function openVideo(file) {
   setButtons(false);
   source = 'video';
   try { camera.stop(); } catch {}
-  elStatus.textContent = '解析の準備中…（初回はモデルの読み込みに少し時間がかかります）';
-  const t = await loadTasks();
+  // 範囲を選んでいるあいだに、裏でモデルを読み込んでおく
+  tasksPromise = tasksPromise || loadTasks().catch(err => { tasksPromise = null; throw err; });
+  tasksPromise.catch(() => {});
 
+  elStatus.textContent = '動画を読み込み中…';
   if (fileVideo.src) URL.revokeObjectURL(fileVideo.src);
   fileVideo.src = URL.createObjectURL(file);
   await new Promise((resolve, reject) => {
@@ -851,15 +885,88 @@ async function analyzeVideo(file) {
 
   mirrorX = false;
   phase = 'idle';
+  frames = []; liveSpeed.L = liveSpeed.R = null;
   fitCanvasesTo(fileVideo);
+  clearArt();
+  elRangePreview.width = 320;
+  elRangePreview.height = Math.round(320 * fileVideo.videoHeight / fileVideo.videoWidth);
+
+  for (const el of [elRangeStart, elRangeEnd]) el.max = dur.toFixed(1);
+  elRangeStart.value = 0;
+  elRangeEnd.value = dur.toFixed(1);
+  elRangePanel.hidden = false;
+  btnVideo.disabled = false;
+  updateRange(elRangeStart);
+  elRangePanel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  elStatus.textContent = '解析する範囲を選んで「▶ この範囲を解析」を押してください';
+}
+
+// スライダーを動かすと、その位置のコマを表示する（シーク中に来た分は最後の1つだけ処理）
+let previewBusy = false, previewNext = null;
+async function showFrameAt(time) {
+  previewNext = time;
+  if (previewBusy) return;
+  previewBusy = true;
+  while (previewNext !== null) {
+    const t = previewNext; previewNext = null;
+    await seekTo(fileVideo, t);
+    const pc = elRangePreview.getContext('2d');
+    pc.drawImage(fileVideo, 0, 0, elRangePreview.width, elRangePreview.height);
+    camCtx.drawImage(fileVideo, 0, 0, cam.width, cam.height);
+  }
+  previewBusy = false;
+}
+
+function updateRange(moved) {
+  let a = +elRangeStart.value, b = +elRangeEnd.value;
+  const dur = +elRangeEnd.max;
+  // 開始と終了が逆転・近づきすぎないように
+  if (b - a < MIN_RANGE) {
+    if (moved === elRangeStart) { a = Math.max(0, Math.min(a, dur - MIN_RANGE)); b = Math.min(dur, a + MIN_RANGE); }
+    else { b = Math.min(dur, Math.max(b, MIN_RANGE)); a = Math.max(0, b - MIN_RANGE); }
+    elRangeStart.value = a; elRangeEnd.value = b;
+  }
+  document.getElementById('rangeStartVal').textContent = a.toFixed(1) + '秒';
+  document.getElementById('rangeEndVal').textContent = b.toFixed(1) + '秒';
+  const n = Math.floor((b - a) * VIDEO_FPS) + 1;
+  document.getElementById('rangeInfo').textContent =
+    `解析する長さ：${(b - a).toFixed(1)} 秒（${n} コマ・1秒 ${VIDEO_FPS} コマ）／ 動画全体 ${dur.toFixed(1)} 秒`;
+  showFrameAt(moved === elRangeEnd ? Math.min(b, dur - 0.05) : a);
+}
+elRangeStart.oninput = () => updateRange(elRangeStart);
+elRangeEnd.oninput = () => updateRange(elRangeEnd);
+
+document.getElementById('rangeGo').onclick = () => {
+  elRangePanel.hidden = true;
+  analyzeVideo(+elRangeStart.value, +elRangeEnd.value).catch(videoError);
+};
+document.getElementById('rangeCancel').onclick = () => {
+  elRangePanel.hidden = true;
+  if (cameraReady) {
+    backToCamera();
+    elStatus.textContent = '準備完了 — 「記録スタート」を押すと3秒後に5秒間記録します';
+  } else {
+    elStatus.textContent = '動画の読み込みをやめました';
+  }
+  setButtons(true);
+};
+
+async function analyzeVideo(start, end) {
+  setButtons(false);
+  elStatus.textContent = '解析の準備中…（初回はモデルの読み込みに少し時間がかかります）';
+  const t = await tasksPromise;
+  while (previewBusy) await new Promise(r => setTimeout(r, 50)); // 範囲プレビューのシークが終わるのを待つ
+  const dur = fileVideo.duration;
+  end = Math.min(end, dur);
+
   phase = 'analyzing';
   frames = []; liveSpeed.L = liveSpeed.R = null;
-  recDurationMs = dur * 1000;
+  recDurationMs = (end - start) * 1000;
   clearArt();
 
-  const total = Math.floor(dur * VIDEO_FPS) + 1;
+  const total = Math.floor((end - start) * VIDEO_FPS) + 1;
   for (let i = 0; i < total; i++) {
-    const time = Math.min(i / VIDEO_FPS, dur - 0.001);
+    const time = Math.min(start + i / VIDEO_FPS, dur - 0.001);
     await seekTo(fileVideo, time);
     const ts = tasksClock + Math.round(time * 1000) + i; // 必ず増えるように
     const results = toHolisticShape(fileVideo,
@@ -867,10 +974,10 @@ async function analyzeVideo(file) {
       t.face.detectForVideo(fileVideo, ts),
       t.pose.detectForVideo(fileVideo, ts));
     const parts = renderPreview(results);
-    frames.push(buildFrame(Math.round(time * 1000), parts));
+    frames.push(buildFrame(Math.round((time - start) * 1000), parts)); // 範囲の先頭を 0 秒とする
     if (i % 5 === 0) drawStrokes(frames);
     progressBar((i + 1) / total);
-    elStatus.textContent = `動画を解析中… ${Math.round((i + 1) / total * 100)}%（${(time).toFixed(1)} / ${dur.toFixed(1)} 秒）`;
+    elStatus.textContent = `動画を解析中… ${Math.round((i + 1) / total * 100)}%（${time.toFixed(1)} 秒 ／ ${start.toFixed(1)}〜${end.toFixed(1)} 秒）`;
   }
   tasksClock += Math.round(dur * 1000) + total + 1000;
 
