@@ -790,6 +790,10 @@ const btnVideo = document.getElementById('loadVideo');
 const elVideoFile = document.getElementById('videoFile');
 const fileVideo = document.createElement('video');
 fileVideo.muted = true; fileVideo.playsInline = true; fileVideo.preload = 'auto';
+fileVideo.setAttribute('playsinline', ''); fileVideo.setAttribute('muted', '');
+// iPhone の Safari はページに置いていない動画を読み込まないことがあるので、見えない形で置いておく
+fileVideo.style.cssText = 'position:fixed; left:0; top:0; width:1px; height:1px; opacity:0; pointer-events:none;';
+document.body.appendChild(fileVideo);
 
 let tasks = null;
 let tasksClock = 0; // detectForVideo のタイムスタンプは増え続ける必要があるので、動画をまたいで足していく
@@ -878,9 +882,17 @@ async function openVideo(file) {
   if (fileVideo.src) URL.revokeObjectURL(fileVideo.src);
   fileVideo.src = URL.createObjectURL(file);
   await new Promise((resolve, reject) => {
-    fileVideo.onloadeddata = resolve;
+    fileVideo.onloadedmetadata = resolve;
     fileVideo.onerror = () => reject(new Error('この動画は読み込めませんでした'));
   });
+  // iPhone の Safari は、一度再生しないとコマの中身を読み込まない。一瞬再生してすぐ止める
+  if (fileVideo.readyState < 2) {
+    try { await fileVideo.play(); } catch {}
+    fileVideo.pause();
+    if (fileVideo.readyState < 2) {
+      await new Promise(resolve => { fileVideo.onloadeddata = resolve; setTimeout(resolve, 3000); });
+    }
+  }
   const dur = fileVideo.duration;
 
   mirrorX = false;
