@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Body Stroke</title>
+<!-- キャプチャ方式は JSL_app (jsl_sign.html) と同じ MediaPipe Holistic + camera_utils -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #111318; color: #e5e7eb;
+    font-family: "Hiragino Sans", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center; padding: 16px;
+  }
+  h1 { font-size: 18px; margin: 0 0 12px; letter-spacing: .05em; }
+  .stage { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; }
+  .panel { display: flex; flex-direction: column; gap: 6px; align-items: center; }
+  .panel span { font-size: 12px; color: #9ca3af; }
+  canvas { border-radius: 10px; max-width: 100%; height: auto; display: block; }
+  .panel { max-width: 100%; }
+  #cam { background: #000; width: 640px; }
+  #art { background: #fff; width: 640px; }
+  button, input, label { touch-action: manipulation; }
+  .controls { margin-top: 14px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; align-items: center; }
+  button {
+    font: inherit; font-size: 14px; padding: 10px 18px; border-radius: 8px; cursor: pointer;
+    border: 1px solid rgba(255,255,255,.18); background: #1f2430; color: #e5e7eb;
+  }
+  button.primary { background: #ef4444; border-color: #ef4444; color: #fff; font-weight: bold; }
+  button:disabled { opacity: .4; cursor: default; }
+  label { font-size: 13px; color: #cbd5e1; display: flex; gap: 6px; align-items: center; }
+  #status { margin-top: 10px; font-size: 14px; min-height: 1.4em; }
+  .legend { display: flex; gap: 12px; margin-top: 10px; font-size: 13px; flex-wrap: wrap; justify-content: center; }
+  .legend label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+  .legend input[type=color] {
+    -webkit-appearance: none; appearance: none; width: 22px; height: 22px; padding: 0;
+    border: 2px solid rgba(255,255,255,.35); border-radius: 50%; background: none; cursor: pointer;
+  }
+  .legend input[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
+  .legend input[type=color]::-webkit-color-swatch { border: none; border-radius: 50%; }
+  .legend button { font-size: 12px; padding: 4px 10px; }
+  #video { display: none; }
+  .tune { margin-top: 12px; display: flex; gap: 22px; flex-wrap: wrap; justify-content: center;
+          padding: 10px 16px; border-radius: 10px; background: #1a1e27; }
+  .tune label { gap: 8px; }
+  .tune input[type=range] { width: 150px; }
+  .tune .val { min-width: 3.2em; color: #fff; font-variant-numeric: tabular-nums; }
+  .tune small { color: #9ca3af; }
+
+  /* スマホ（幅 700px 以下）：縦に並べて、指で操作しやすい大きさに */
+  @media (max-width: 700px) {
+    body { padding: 12px 16px 32px; }
+    h1 { font-size: 16px; }
+    .stage { gap: 10px; width: 100%; }
+    .panel, #cam, #art { width: 100%; }
+    .controls { gap: 8px; }
+    .controls button { flex: 1 1 40%; padding: 12px 10px; }
+    .controls button.primary { flex-basis: 100%; font-size: 16px; padding: 14px; }
+    .tune { width: 100%; flex-direction: column; gap: 14px; align-items: stretch; }
+    .tune label { justify-content: space-between; flex-wrap: wrap; }
+    .tune input[type=range] { flex: 1; min-width: 120px; width: auto; height: 28px; }
+    .tune input[type=checkbox] { width: 20px; height: 20px; margin: 0; }
+    .tune label:has(input[type=checkbox]) { justify-content: flex-start; }
+    .legend { gap: 10px 14px; }
+    .legend input[type=color] { width: 28px; height: 28px; }
+  }
+</style>
+</head>
+<body>
+<h1>Body Stroke — 指先で描く</h1>
+
+<div class="stage">
+  <div class="panel">
+    <canvas id="cam" width="640" height="480"></canvas>
+    <span>カメラ</span>
+  </div>
+  <div class="panel">
+    <canvas id="art" width="1280" height="960"></canvas>
+    <span>ストローク</span>
+  </div>
+</div>
+
+<div class="legend" id="legend"></div>
+
+<div class="controls">
+  <button id="rec" class="primary" disabled>● 記録スタート</button>
+  <label>秒数 <input id="dur" type="number" min="1" max="30" value="5" style="width:52px"></label>
+  <button id="replay" disabled>▶ 再生</button>
+  <button id="savePng" disabled>PNG保存</button>
+  <button id="saveJson" disabled>データ保存(JSON)</button>
+</div>
+<div class="tune">
+  <label>指先の点の大きさ<small>（ゆっくり時）</small>
+    <input id="size" type="range" min="1" max="20" step="0.5" value="6">
+    <span class="val" id="sizeVal"></span>
+  </label>
+  <label>太さの変化
+    <small>弱い</small>
+    <input id="widthVar" type="range" min="0" max="100" value="70">
+    <small>強い</small>
+  </label>
+  <label>濃淡調整
+    <small>弱い</small>
+    <input id="contrast" type="range" min="0" max="100" value="80">
+    <small>強い</small>
+  </label>
+  <label><input id="showArms" type="checkbox" checked> 肩・腕も描く</label>
+  <label><input id="showPalms" type="checkbox" checked> 手のひらも描く</label>
+  <label><input id="showFingerBones" type="checkbox" checked> 指の骨組みも描く</label>
+  <label>肩・腕の濃さ
+    <small>薄い</small>
+    <input id="armAlpha" type="range" min="5" max="100" value="35">
+    <small>濃い</small>
+  </label>
+</div>
+<div id="status">MediaPipe 読み込み中…</div>
+
+<video id="video" playsinline muted autoplay></video>
+
+<script>
+// ── 設定 ──────────────────────────────────────────────
+// MediaPipe Hand のランドマーク番号: 4=親指, 8=人差し指, 12=中指, 16=薬指, 20=小指
+const FINGERS = [
+  { name: '親指',     idx: 4,  key: 'thumb'  },
+  { name: '人差し指', idx: 8,  key: 'index'  },
+  { name: '中指',     idx: 12, key: 'middle' },
+  { name: '薬指',     idx: 16, key: 'ring'   },
+  { name: '小指',     idx: 20, key: 'pinky'  },
+];
+// MediaPipe Face のランドマーク番号: 468/473=瞳の中心（refineFaceLandmarks 必須）
+const FACE_POINTS = [
+  { name: '目（瞳）', idx: 468, key: 'eye' },
+  { name: '目（瞳）', idx: 473, key: 'eye' },
+];
+// MediaPipe Pose のランドマーク番号: 11/12=肩, 13/14=ひじ, 15/16=手首
+// frames の arms には、この順番で6点が入る
+const ARM_POINTS = [
+  { name: '肩',   idx: 11 }, { name: '肩',   idx: 12 },
+  { name: 'ひじ', idx: 13 }, { name: 'ひじ', idx: 14 },
+  { name: '手首', idx: 15 }, { name: '手首', idx: 16 },
+];
+// 肩・腕の骨組み（線）。a, b は ARM_POINTS の並び順
+const ARM_BONES = [
+  { a: 0, b: 1, key: 'shoulder' }, // 肩〜肩
+  { a: 0, b: 2, key: 'upperArm' }, // 肩〜ひじ
+  { a: 1, b: 3, key: 'upperArm' },
+  { a: 2, b: 4, key: 'forearm'  }, // ひじ〜手首
+  { a: 3, b: 5, key: 'forearm'  },
+];
+// MediaPipe Hand の手のひらの骨組み: 0=手首, 1=親指の付け根, 5/9/13/17=人差し指〜小指の付け根
+// frames の palms には、この順番で6点が入る
+const PALM_POINTS = [{ idx: 0 }, { idx: 1 }, { idx: 5 }, { idx: 9 }, { idx: 13 }, { idx: 17 }];
+const PALM_BONES = [
+  { a: 0, b: 1, key: 'palm' }, { a: 0, b: 2, key: 'palm' }, { a: 2, b: 3, key: 'palm' },
+  { a: 3, b: 4, key: 'palm' }, { a: 4, b: 5, key: 'palm' }, { a: 0, b: 5, key: 'palm' },
+];
+// 指の骨組み: 各指の 付け根→第2関節→第1関節→指先（1-2-3-4, 5-6-7-8, 9-10-11-12, 13-14-15-16, 17-18-19-20）
+// frames の fingerBones には、手のランドマーク 1〜20 がこの順番で20点入る（配列の番号 = ランドマーク番号 - 1）
+const FINGER_BONE_POINTS = Array.from({ length: 20 }, (_, i) => ({ idx: i + 1 }));
+const FINGER_BONES = [1, 5, 9, 13, 17].flatMap(base =>
+  [0, 1, 2].map(k => ({ a: base - 1 + k, b: base + k, key: 'fingerBone' })));
+// 前腕は立体感を出すため、肩・上腕より濃く・手前に描く（肩・腕の濃さ × この倍率、最大 1）
+const FOREARM_STRENGTH = 2.2;
+const ARM_FRAME_ALPHA = 0.15; // 1フレーム分の骨組みの濃さ（重なるほど濃くなる）
+const MIN_VISIBILITY = 0.5; // これより見えていない関節（画面の外など）は記録しない
+
+// 色の初期値（画面の色ボタンで変えられる。変えた色は settings.colors に入る）
+const DEFAULT_COLORS = {
+  thumb:  '#000000', // 黒
+  index:  '#000000', // 黒
+  middle: '#000000', // 黒
+  ring:   '#000000', // 黒
+  pinky:  '#000000', // 黒
+  mouth:  '#000000', // 黒
+  eye:    '#000000', // 黒
+  shoulder: '#475569', // グレー
+  upperArm: '#0891b2', // 青緑
+  forearm:  '#a16207', // 茶
+  palm:     '#c4ccd8', // 薄いグレー
+  fingerBone: '#c4ccd8', // 薄いグレー（手のひらと同じ）
+  background: '#ffffff', // ストローク画面の背景：白
+};
+const COLOR_LABELS = [
+  ...FINGERS.map(f => ({ key: f.key, name: f.name })),
+  { key: 'mouth', name: '口' }, { key: 'eye', name: '目' },
+  { key: 'shoulder', name: '肩（肩〜肩）' }, { key: 'upperArm', name: '上腕（肩〜ひじ）' }, { key: 'forearm', name: '前腕（ひじ〜手首）' },
+  { key: 'palm', name: '手のひら' }, { key: 'fingerBone', name: '指の骨組み' },
+  { key: 'background', name: '背景' },
+];
+// 口の形：唇の外側と内側の輪郭（1周、閉じた形）
+const LIP_OUTER = [61,146,91,181,84,17,314,405,321,375,291,409,270,269,267,0,37,39,40,185];
+const LIP_INNER = [78,95,88,178,87,14,317,402,318,324,308,415,310,311,312,13,82,81,80,191];
+const MOUTH_COUNT = 4;          // 記録時間のあいだに描く口の形の枚数（等間隔に間引く）
+
+// 速さ → 濃さ：止まっているほど濃く、すばやい動きほど薄く
+// 速さの単位は「画面の高さ／秒」
+const SPEED_STILL = 0.05;  // これ以下は「止まっている」→ いちばん濃い
+const SPEED_FAST  = 1.2;   // これ以上は「瞬間的な動き」→ いちばん薄い
+
+// 画面の調整ツールの値
+//  brushPx  : 指先の点の大きさ（画面上の px。描画キャンバスは2倍の解像度なので内部では ×2）
+//  widthVar : 太さの変化 0〜1（0=変化なし、1=すばやい動きは 1割の太さまで細くなる）
+//  contrast : 濃淡の強さ 0〜1（0=濃淡なし、1=すばやい動きはほぼ消える）
+const settings = { brushPx: 6, widthVar: 0.7, contrast: 0.8, showArms: true, showPalms: true, showFingerBones: true, armAlpha: 0.35, colors: { ...DEFAULT_COLORS } };
+const colorOf = key => settings.colors[key] || DEFAULT_COLORS[key];
+
+// 速さ → 太さ：ゆっくりほど太く（= brushPx）、すばやいほど細く
+function speedToWidthRatio(v) {
+  return 1 - 0.9 * settings.widthVar * speedRatio(v);
+}
+
+function speedRatio(v) {
+  return Math.min(1, Math.max(0, (v - SPEED_STILL) / (SPEED_FAST - SPEED_STILL)));
+}
+// max: 止まっているときの濃さ。濃淡が強いほど、速いときに 0.03 まで下がる
+function speedToAlpha(v, max = 1) {
+  const min = max - (max - 0.03) * settings.contrast;
+  return max - (max - min) * speedRatio(v);
+}
+const COUNTDOWN_SEC = 3;
+
+
+// ── 要素 ──────────────────────────────────────────────
+const video   = document.getElementById('video');
+const cam     = document.getElementById('cam');
+const camCtx  = cam.getContext('2d');
+const art     = document.getElementById('art');
+const artCtx  = art.getContext('2d');
+const elStatus = document.getElementById('status');
+const btnRec  = document.getElementById('rec');
+const btnReplay = document.getElementById('replay');
+const btnPng  = document.getElementById('savePng');
+const btnJson = document.getElementById('saveJson');
+
+// ── 状態 ──────────────────────────────────────────────
+let phase = 'idle';      // idle | countdown | recording
+let recStart = 0, recDurationMs = 5000, countdownEnd = 0;
+let frames = [];         // [{t, hands: {L: [{x,y,z}x5] | null, R: ...}, face: [瞳x2] | null, mouth: {outer, inner} | null, arms: [肩・ひじ・手首 x6] | null, palms: {L: [手のひら x6] | null, R: ...}, fingerBones: {L: [指の関節 x20] | null, R: ...}}]
+
+// ── MediaPipe Holistic（JSL_app と同じ構成） ─────────────
+const holistic = new Holistic({
+  locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${f}`
+});
+// スマホ（指で操作する端末）は処理が重いので、軽いモデルを使う
+const IS_TOUCH = window.matchMedia('(pointer: coarse)').matches;
+holistic.setOptions({
+  modelComplexity: IS_TOUCH ? 0 : 1, smoothLandmarks: true, enableSegmentation: false,
+  refineFaceLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5,
+});
+holistic.onResults(onResults);
+
+// 指定した点だけ取り出し、表示に合わせて左右反転（x → 1-x）
+function pick(lm, points) {
+  if (!lm) return null;
+  return points.map(f => {
+    const p = lm[f.idx];
+    if (!p || (p.visibility !== undefined && p.visibility < MIN_VISIBILITY)) return null;
+    return { x: 1 - p.x, y: p.y, z: p.z };
+  });
+}
+
+// カメラ画面の指先の丸を、いまの速さで太く・細くするための速さ（なめらかにしたもの）
+const liveSpeed = { L: null, R: null };
+function updateLiveSpeed(side, hand, t) {
+  const prev = liveSpeed[side];
+  const pos = FINGERS.map(f => ({ x: hand[f.idx].x * cam.width / cam.height, y: hand[f.idx].y }));
+  if (!prev) { liveSpeed[side] = { t, pos, v: FINGERS.map(() => 0) }; return; }
+  const dt = Math.max(1, t - prev.t) / 1000;
+  const v = pos.map((p, i) => 0.7 * prev.v[i] + 0.3 * Math.hypot(p.x - prev.pos[i].x, p.y - prev.pos[i].y) / dt);
+  liveSpeed[side] = { t, pos, v };
+}
+
+function mouthShape(face) {
+  if (!face) return null;
+  const ring = idx => idx.map(i => ({ x: 1 - face[i].x, y: face[i].y }));
+  return { outer: ring(LIP_OUTER), inner: ring(LIP_INNER) };
+}
+
+// カメラ映像の縦横比に合わせてキャンバスの大きさを変える（スマホの縦向きカメラ対策）
+function fitCanvasesTo(img) {
+  const iw = img.width, ih = img.height;
+  if (!iw || !ih || phase === 'recording') return;
+  const scale = 640 / Math.max(iw, ih);
+  const w = Math.round(iw * scale), h = Math.round(ih * scale);
+  if (cam.width === w && cam.height === h) return;
+  cam.width = w; cam.height = h;
+  art.width = armLayer.width = w * 2;
+  art.height = armLayer.height = h * 2;
+  cam.style.width = art.style.width = '';
+  if (frames.length) drawStrokes(frames); else clearArt();
+}
+
+function onResults(results) {
+  fitCanvasesTo(results.image);
+  const W = cam.width, H = cam.height;
+  camCtx.save();
+  camCtx.clearRect(0, 0, W, H);
+  camCtx.translate(W, 0); camCtx.scale(-1, 1);
+  camCtx.drawImage(results.image, 0, 0, W, H);
+  camCtx.restore();
+
+  // 注意: MediaPipe の左右ラベルは鏡映入力前提なので、実際の左右と入れ替わる（JSL_app と同じ扱い）
+  const realRight = results.leftHandLandmarks  || null;
+  const realLeft  = results.rightHandLandmarks || null;
+  const face      = results.faceLandmarks      || null;
+  const pose      = results.poseLandmarks      || null;
+
+  camCtx.save();
+  camCtx.translate(W, 0); camCtx.scale(-1, 1);
+  const nowT = performance.now();
+  [['L', realLeft], ['R', realRight]].forEach(([side, hand]) => {
+    if (!hand) { liveSpeed[side] = null; return; }
+    drawConnectors(camCtx, hand, HAND_CONNECTIONS, { color: 'rgba(255,255,255,0.5)', lineWidth: 2 });
+    if (settings.showPalms) {
+      camCtx.strokeStyle = colorOf('palm'); camCtx.lineWidth = 3;
+      for (const bone of PALM_BONES) {
+        const p = hand[PALM_POINTS[bone.a].idx], q = hand[PALM_POINTS[bone.b].idx];
+        camCtx.beginPath(); camCtx.moveTo(p.x * W, p.y * H); camCtx.lineTo(q.x * W, q.y * H); camCtx.stroke();
+      }
+    }
+    if (settings.showFingerBones) {
+      camCtx.strokeStyle = colorOf('fingerBone'); camCtx.lineWidth = 3;
+      for (const bone of FINGER_BONES) {
+        const p = hand[FINGER_BONE_POINTS[bone.a].idx], q = hand[FINGER_BONE_POINTS[bone.b].idx];
+        camCtx.beginPath(); camCtx.moveTo(p.x * W, p.y * H); camCtx.lineTo(q.x * W, q.y * H); camCtx.stroke();
+      }
+    }
+    updateLiveSpeed(side, hand, nowT);
+    FINGERS.forEach((f, fi) => {
+      const p = hand[f.idx];
+      const r = settings.brushPx / 2 * speedToWidthRatio(liveSpeed[side].v[fi]);
+      camCtx.beginPath();
+      camCtx.arc(p.x * W, p.y * H, Math.max(1.5, r), 0, Math.PI * 2);
+      camCtx.fillStyle = colorOf(f.key); camCtx.fill();
+      camCtx.lineWidth = 1.5; camCtx.strokeStyle = '#fff'; camCtx.stroke();
+    });
+  });
+  if (pose && settings.showArms) {
+    camCtx.lineWidth = 4; camCtx.lineCap = 'round';
+    for (const bone of ARM_BONES) {
+      const p = pose[ARM_POINTS[bone.a].idx], q = pose[ARM_POINTS[bone.b].idx];
+      if (p.visibility < MIN_VISIBILITY || q.visibility < MIN_VISIBILITY) continue;
+      camCtx.beginPath();
+      camCtx.moveTo(p.x * W, p.y * H);
+      camCtx.lineTo(q.x * W, q.y * H);
+      camCtx.strokeStyle = colorOf(bone.key); camCtx.stroke();
+    }
+  }
+  if (face) {
+    for (const ring of [LIP_OUTER, LIP_INNER]) {
+      camCtx.beginPath();
+      ring.forEach((i, k) => {
+        const p = face[i];
+        k ? camCtx.lineTo(p.x * W, p.y * H) : camCtx.moveTo(p.x * W, p.y * H);
+      });
+      camCtx.closePath();
+      camCtx.strokeStyle = colorOf('mouth'); camCtx.lineWidth = 2; camCtx.stroke();
+    }
+    FACE_POINTS.forEach(f => {
+      const p = face[f.idx];
+      if (!p) return;
+      camCtx.beginPath();
+      camCtx.arc(p.x * W, p.y * H, 4, 0, Math.PI * 2);
+      camCtx.fillStyle = colorOf(f.key); camCtx.fill();
+    });
+  }
+  camCtx.restore();
+
+  const now = performance.now();
+
+  if (phase === 'countdown') {
+    const remain = Math.ceil((countdownEnd - now) / 1000);
+    if (remain > 0) {
+      overlayText(String(remain), 160);
+    } else {
+      phase = 'recording'; recStart = now; frames = [];
+      clearArt();
+    }
+  }
+
+  if (phase === 'recording') {
+    const t = now - recStart;
+    frames.push({ t: Math.round(t), hands: { L: pick(realLeft, FINGERS), R: pick(realRight, FINGERS) }, face: pick(face, FACE_POINTS), mouth: mouthShape(face), arms: pick(pose, ARM_POINTS),
+      palms: { L: pick(realLeft, PALM_POINTS), R: pick(realRight, PALM_POINTS) },
+      fingerBones: { L: pick(realLeft, FINGER_BONE_POINTS), R: pick(realRight, FINGER_BONE_POINTS) } });
+    drawStrokes(frames);  // ライブで描画
+    const left = Math.max(0, (recDurationMs - t) / 1000);
+    overlayText('● REC ' + left.toFixed(1) + 's', 36, 'top');
+    progressBar(t / recDurationMs);
+    if (t >= recDurationMs) finishRecording();
+  }
+}
+
+function overlayText(txt, size, pos = 'center') {
+  camCtx.save();
+  camCtx.font = `bold ${size}px Hiragino Sans, sans-serif`;
+  camCtx.textAlign = 'center';
+  camCtx.fillStyle = pos === 'top' ? '#ef4444' : 'rgba(255,255,255,0.9)';
+  camCtx.strokeStyle = 'rgba(0,0,0,0.5)'; camCtx.lineWidth = 4;
+  const y = pos === 'top' ? 50 : cam.height / 2 + size / 3;
+  camCtx.strokeText(txt, cam.width / 2, y);
+  camCtx.fillText(txt, cam.width / 2, y);
+  camCtx.restore();
+}
+function progressBar(r) {
+  camCtx.fillStyle = '#ef4444';
+  camCtx.fillRect(0, cam.height - 6, cam.width * Math.min(1, r), 6);
+}
+
+// 肩・腕用の重ね描き用レイヤー（画面には出さない）
+const armLayer = document.createElement('canvas');
+armLayer.width = art.width; armLayer.height = art.height;
+const armCtx = armLayer.getContext('2d');
+
+// ── ストローク描画 ─────────────────────────────────────
+function clearArt() {
+  artCtx.fillStyle = colorOf('background');
+  artCtx.fillRect(0, 0, art.width, art.height);
+}
+
+// 描く軌跡の一覧：両手×5指 ＋ 目
+const TRACKS = [
+  ...['L', 'R'].flatMap(side => FINGERS.map((f, i) => ({ key: f.key, get: fr => fr.hands[side]?.[i] }))),
+  ...FACE_POINTS.map((f, i) => ({ key: f.key, get: fr => fr.face?.[i] })),
+];
+
+// frames を受け取り、各軌跡を滑らかな線で描く。見失われたフレームで線を切る。
+function drawStrokes(fs) {
+  clearArt();
+  const W = art.width, H = art.height;
+  artCtx.lineCap = 'round'; artCtx.lineJoin = 'round';
+
+  // 肩・腕は別の層に描いてから、層ごと薄くして重ねる
+  // （往復して線が何度も重なっても、settings.armAlpha より濃くならない）。指先より下に敷く
+  // 奥：肩・上腕 → 手前：前腕＋手のひら＋指の骨組み（濃いめ）の順に重ねる
+  const backBones  = ARM_BONES.filter(b => b.key !== 'forearm');
+  const frontBones = ARM_BONES.filter(b => b.key === 'forearm');
+  const layers = [
+    { alpha: settings.armAlpha, draw: () => {
+      if (settings.showArms) drawBones(fs, fr => fr.arms, backBones);
+    } },
+    { alpha: Math.min(1, settings.armAlpha * FOREARM_STRENGTH), draw: () => {
+      if (settings.showArms) drawBones(fs, fr => fr.arms, frontBones);
+      if (settings.showPalms) for (const side of ['L', 'R']) drawBones(fs, fr => fr.palms?.[side], PALM_BONES);
+      if (settings.showFingerBones) for (const side of ['L', 'R']) drawBones(fs, fr => fr.fingerBones?.[side], FINGER_BONES);
+    } },
+  ];
+  for (const layer of layers) {
+    armCtx.clearRect(0, 0, W, H);
+    armCtx.lineCap = 'round'; armCtx.lineJoin = 'round';
+    layer.draw();
+    artCtx.save();
+    artCtx.globalAlpha = layer.alpha;
+    artCtx.drawImage(armLayer, 0, 0);
+    artCtx.restore();
+  }
+  for (const tr of TRACKS) drawTrack(tr, fs, artCtx);
+  drawMouths(fs);
+}
+
+// 肩・腕は毎フレームの骨組み（線）を重ねて描く。止まっているほど重なって濃く、すばやいほど薄く
+// getPts(frame) でその骨組みの点の配列を取り出す（肩・腕も手のひらも同じ描き方）
+function drawBones(fs, getPts, bones) {
+  const W = art.width, H = art.height;
+  armCtx.lineWidth = Math.max(1, brushWidth() * 0.5);
+  let prev = null;
+  for (const fr of fs) {
+    const pts = getPts(fr);
+    if (!pts) { prev = null; continue; }
+    const dt = prev ? Math.max(1, fr.t - prev.t) / 1000 : 1;
+    for (const bone of bones) {
+      const p = pts[bone.a], q = pts[bone.b];
+      if (!p || !q) continue;
+      // 骨の両端の速さの平均（画面の高さ／秒）
+      let v = 0;
+      const pp = prev?.[bone.a], pq = prev?.[bone.b];
+      if (pp && pq) {
+        const d = (Math.hypot((p.x - pp.x) * W / H, p.y - pp.y) + Math.hypot((q.x - pq.x) * W / H, q.y - pq.y)) / 2;
+        v = d / dt;
+      }
+      armCtx.globalAlpha = speedToAlpha(v, ARM_FRAME_ALPHA);
+      armCtx.strokeStyle = colorOf(bone.key);
+      armCtx.beginPath();
+      armCtx.moveTo(p.x * W, p.y * H);
+      armCtx.lineTo(q.x * W, q.y * H);
+      armCtx.stroke();
+    }
+    prev = pts;
+  }
+  armCtx.globalAlpha = 1;
+}
+
+// 1本の軌跡を、見失われたフレームで区切って描く
+function drawTrack(tr, fs, ctx) {
+  const W = art.width, H = art.height;
+  const segs = []; let cur = [];
+  for (const fr of fs) {
+    const p = tr.get(fr);
+    if (p) cur.push({ x: p.x * W, y: p.y * H, t: fr.t });
+    else if (cur.length) { segs.push(cur); cur = []; }
+  }
+  if (cur.length) segs.push(cur);
+  ctx.strokeStyle = colorOf(tr.key);
+  for (const pts of segs) strokeSmooth(pts, ctx);
+}
+
+// 口は毎フレームの形を重ねて描く（形の変化が残像のように積み重なる）
+// 口が止まっている（位置も形も変わらない）ほど濃く、すばやく動くほど薄く
+function drawMouths(fs) {
+  const W = art.width, H = art.height;
+  artCtx.save();
+  artCtx.strokeStyle = colorOf('mouth'); artCtx.lineWidth = 2;
+  // 記録時間を枚数で割った間隔ごとに1枚だけ描く（再生中も同じフレームが選ばれるよう時間で決める）
+  const interval = recDurationMs / MOUTH_COUNT;
+  let prev = null, nextT = 0;
+  for (const fr of fs) {
+    if (!fr.mouth) { prev = null; continue; }
+    const draw = fr.t >= nextT;
+    if (draw) nextT = fr.t + interval;
+    let v = 0;
+    if (prev) {
+      // 輪郭の各点の移動量の平均（画面の高さ／秒）
+      const a = [...prev.mouth.outer, ...prev.mouth.inner], b = [...fr.mouth.outer, ...fr.mouth.inner];
+      const d = b.reduce((sum, p, i) => sum + Math.hypot((p.x - a[i].x) * W / H, p.y - a[i].y), 0) / b.length;
+      v = d / (Math.max(1, fr.t - prev.t) / 1000);
+    }
+    // 重なりで真っ黒にならないよう、口は上限を低めに
+    if (draw) {
+      artCtx.globalAlpha = speedToAlpha(v, 0.5);
+      for (const ring of [fr.mouth.outer, fr.mouth.inner]) closedSmooth(ring.map(p => ({ x: p.x * W, y: p.y * H })));
+    }
+    prev = fr;
+  }
+  artCtx.restore();
+}
+
+// 閉じた輪郭を中点ベジェでなめらかに一周
+function closedSmooth(pts) {
+  const n = pts.length;
+  artCtx.beginPath();
+  const m0 = mid(pts[n - 1], pts[0]);
+  artCtx.moveTo(m0.x, m0.y);
+  for (let i = 0; i < n; i++) {
+    const m = mid(pts[i], pts[(i + 1) % n]);
+    artCtx.quadraticCurveTo(pts[i].x, pts[i].y, m.x, m.y);
+  }
+  artCtx.stroke();
+}
+
+// 中点を通る二次ベジェで滑らかに。速いほど細く・薄く。
+function strokeSmooth(pts, ctx = artCtx) {
+  if (pts.length === 1) {
+    ctx.beginPath();
+    ctx.arc(pts[0].x, pts[0].y, brushWidth() / 2, 0, Math.PI * 2);
+    ctx.fillStyle = ctx.strokeStyle; ctx.fill();
+    return;
+  }
+  // 区間ごとの速さ（画面の高さ／秒）。検出のブレでチラつかないよう前後をならす
+  const H = art.height;
+  const raw = pts.map((p, i) => {
+    if (i === 0) return 0;
+    const q = pts[i - 1], dt = Math.max(1, p.t - q.t) / 1000;
+    return Math.hypot(p.x - q.x, p.y - q.y) / H / dt;
+  });
+  raw[0] = raw[1];
+  const speeds = raw.map((_, i) => {
+    const w = raw.slice(Math.max(0, i - 2), i + 3);
+    return w.reduce((a, b) => a + b, 0) / w.length;
+  });
+  ctx.save();
+  for (let i = 1; i < pts.length; i++) {
+    const p0 = pts[i - 1], p1 = pts[i];
+    const prevMid = i === 1 ? p0 : mid(pts[i - 2], p0);
+    const nextMid = mid(p0, p1);
+    ctx.lineWidth = Math.max(1, brushWidth() * speedToWidthRatio(speeds[i]));
+    ctx.globalAlpha = speedToAlpha(speeds[i]);
+    ctx.beginPath();
+    ctx.moveTo(prevMid.x, prevMid.y);
+    ctx.quadraticCurveTo(p0.x, p0.y, nextMid.x, nextMid.y);
+    if (i === pts.length - 1) ctx.lineTo(p1.x, p1.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+const brushWidth = () => settings.brushPx * (art.width / cam.width);
+const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+
+// ── 記録制御 ──────────────────────────────────────────
+btnRec.onclick = () => {
+  recDurationMs = Math.max(1, Math.min(30, +document.getElementById('dur').value || 5)) * 1000;
+  phase = 'countdown';
+  countdownEnd = performance.now() + COUNTDOWN_SEC * 1000;
+  setButtons(false);
+  elStatus.textContent = 'カウントダウン…';
+};
+
+function finishRecording() {
+  phase = 'idle';
+  drawStrokes(frames);
+  const detected = frames.filter(f => f.hands.L || f.hands.R).length;
+  const faceDetected = frames.filter(f => f.face).length;
+  elStatus.textContent = `記録完了：${frames.length} フレーム（手を検出 ${detected} ／ 顔を検出 ${faceDetected}）`;
+  setButtons(true);
+}
+
+function setButtons(on) {
+  btnRec.disabled = !on;
+  const has = on && frames.length > 0;
+  btnReplay.disabled = !has; btnPng.disabled = !has; btnJson.disabled = !has;
+}
+
+// 記録した時間どおりにストロークを描き直す
+btnReplay.onclick = () => {
+  setButtons(false);
+  const t0 = performance.now();
+  (function step() {
+    const t = performance.now() - t0;
+    drawStrokes(frames.filter(f => f.t <= t));
+    if (t < frames[frames.length - 1].t) requestAnimationFrame(step);
+    else setButtons(true);
+  })();
+};
+
+const stamp = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+function download(href, name) {
+  const a = document.createElement('a'); a.href = href; a.download = name; a.click();
+}
+btnPng.onclick = () => download(art.toDataURL('image/png'), `body_stroke_${stamp()}.png`);
+btnJson.onclick = () => {
+  const data = {
+    type: 'body-stroke', version: 3, durationMs: recDurationMs, settings,
+    fingers: FINGERS.map(f => ({ name: f.name, landmark: f.idx, color: colorOf(f.key) })),
+    facePoints: FACE_POINTS.map(f => ({ name: f.name, landmark: f.idx, color: colorOf(f.key) })),
+    armPoints: ARM_POINTS.map(f => ({ name: f.name, landmark: f.idx })),
+    palmPoints: PALM_POINTS.map(f => f.idx), palmColor: colorOf('palm'),
+    fingerBonePoints: FINGER_BONE_POINTS.map(f => f.idx), fingerBoneColor: colorOf('fingerBone'),
+    armBones: ARM_BONES.map(b => ({ from: ARM_POINTS[b.a].idx, to: ARM_POINTS[b.b].idx, color: colorOf(b.key) })),
+    mouth: { outerLandmarks: LIP_OUTER, innerLandmarks: LIP_INNER, color: colorOf('mouth'), drawCount: MOUTH_COUNT },
+    note: '座標は 0..1 正規化・表示に合わせて左右反転済み。L/R は本人から見た左右',
+    frames,
+  };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' }));
+  download(url, `body_stroke_${stamp()}.json`);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+// ── 調整ツール ──────────────────────────────────────────
+const elSize = document.getElementById('size'), elSizeVal = document.getElementById('sizeVal');
+const elContrast = document.getElementById('contrast');
+const elWidthVar = document.getElementById('widthVar');
+const elShowArms = document.getElementById('showArms');
+const elShowPalms = document.getElementById('showPalms');
+const elShowFingerBones = document.getElementById('showFingerBones');
+const elArmAlpha = document.getElementById('armAlpha');
+try {
+  const saved = JSON.parse(localStorage.getItem('bodyStrokeSettings') || '{}');
+  Object.assign(settings, saved, { colors: { ...DEFAULT_COLORS, ...(saved.colors || {}) } });
+} catch {}
+
+// 色ボタン（凡例の丸をクリックすると色を選べる）
+const elLegend = document.getElementById('legend');
+function buildLegend() {
+  elLegend.innerHTML = COLOR_LABELS.map(c =>
+    `<label><input type="color" data-key="${c.key}" value="${colorOf(c.key)}">${c.name}</label>`
+  ).join('') + '<button id="resetColors" type="button">色を元に戻す</button>';
+  elLegend.querySelectorAll('input[type=color]').forEach(inp => {
+    inp.oninput = () => { settings.colors[inp.dataset.key] = inp.value; onTune(); };
+  });
+  document.getElementById('resetColors').onclick = () => {
+    settings.colors = { ...DEFAULT_COLORS }; buildLegend(); onTune();
+  };
+}
+buildLegend();
+elSize.value = settings.brushPx; elContrast.value = Math.round(settings.contrast * 100);
+elWidthVar.value = Math.round(settings.widthVar * 100);
+elShowArms.checked = settings.showArms;
+elShowPalms.checked = settings.showPalms;
+elShowFingerBones.checked = settings.showFingerBones;
+elArmAlpha.value = Math.round(settings.armAlpha * 100);
+
+function onTune() {
+  settings.brushPx = +elSize.value;
+  settings.contrast = +elContrast.value / 100;
+  settings.widthVar = +elWidthVar.value / 100;
+  settings.showArms = elShowArms.checked;
+  settings.showPalms = elShowPalms.checked;
+  settings.showFingerBones = elShowFingerBones.checked;
+  settings.armAlpha = +elArmAlpha.value / 100;
+  elSizeVal.textContent = settings.brushPx + 'px';
+  try { localStorage.setItem('bodyStrokeSettings', JSON.stringify(settings)); } catch {}
+  // 記録済みの絵があれば、その場で描き直す（記録中はライブ描画に任せる）
+  if (phase === 'idle') {
+    if (frames.length) drawStrokes(frames);
+    else clearArt();
+  }
+}
+elSize.oninput = onTune; elContrast.oninput = onTune; elWidthVar.oninput = onTune; elShowArms.onchange = onTune; elShowPalms.onchange = onTune; elShowFingerBones.onchange = onTune; elArmAlpha.oninput = onTune;
+onTune();
+
+// ── 起動 ─────────────────────────────────────────────
+const camera = new Camera(video, {
+  onFrame: async () => { await holistic.send({ image: video }); },
+  width: 640, height: 480,
+  facingMode: 'user', // 前面カメラ
+});
+
+clearArt();
+holistic.initialize().then(async () => {
+  try {
+    const p = await navigator.mediaDevices.getUserMedia({ video: true });
+    p.getTracks().forEach(t => t.stop());
+  } catch {
+    elStatus.textContent = 'カメラのアクセスを許可してください';
+    return;
+  }
+  await camera.start();
+  elStatus.textContent = '準備完了 — 「記録スタート」を押すと3秒後に5秒間記録します';
+  setButtons(true);
+}).catch(err => { elStatus.textContent = 'エラー: ' + err.message; });
+</script>
+</body>
+</html>
