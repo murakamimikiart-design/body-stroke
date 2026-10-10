@@ -6,7 +6,6 @@
 <title>Body Stroke</title>
 <!-- キャプチャ方式は JSL_app (jsl_sign.html) と同じ MediaPipe Holistic + camera_utils -->
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
 <style>
   * { box-sizing: border-box; }
@@ -104,6 +103,7 @@
   <button id="replay" disabled>▶ 再生</button>
   <button id="savePng" disabled>PNG保存</button>
   <button id="saveJson" disabled>データ保存(JSON)</button>
+  <button id="saveProcess" disabled>🎬 工程を動画で保存</button>
 </div>
 <div id="rangePanel" class="range-panel" hidden>
   <div class="range-title">解析する範囲を選ぶ</div>
@@ -259,9 +259,10 @@ const btnRec  = document.getElementById('rec');
 const btnReplay = document.getElementById('replay');
 const btnPng  = document.getElementById('savePng');
 const btnJson = document.getElementById('saveJson');
+const btnProcess = document.getElementById('saveProcess');
 
 // ── 状態 ──────────────────────────────────────────────
-let phase = 'idle';      // idle | countdown | recording | analyzing
+let phase = 'idle';      // idle | countdown | recording | analyzing | exporting
 let source = 'camera';   // camera | video（いま何を入力にしているか）
 let cameraReady = false;
 let recStart = 0, recDurationMs = 5000, countdownEnd = 0;
@@ -315,7 +316,7 @@ function mouthShape(face) {
 // カメラ映像の縦横比に合わせてキャンバスの大きさを変える（スマホの縦向きカメラ対策）
 function fitCanvasesTo(img) {
   const iw = img.videoWidth || img.width, ih = img.videoHeight || img.height;
-  if (!iw || !ih || phase === 'recording') return;
+  if (!iw || !ih || (phase !== 'idle' && phase !== 'countdown')) return;
   const scale = 640 / Math.max(iw, ih);
   const w = Math.round(iw * scale), h = Math.round(ih * scale);
   if (cam.width === w && cam.height === h) return;
@@ -338,6 +339,7 @@ function onResults(results) {
       overlayText(String(remain), 160);
     } else {
       phase = 'recording'; recStart = now; frames = [];
+      startClipRecording();
       clearArt();
     }
   }
@@ -364,6 +366,63 @@ function buildFrame(t, { realLeft, realRight, face, pose }) {
   };
 }
 
+// 記録した1フレーム分のデータ（座標は表示の向きにそろえ済み）から、
+// 骨組み・指先の丸・口の輪郭・目を映像の上に重ねて描く。ライブの表示と工程動画の両方で使う
+// tipRadius(side, fingerIndex) は指先の丸の半径
+function drawOverlay(ctx, fr, W, H, tipRadius) {
+  const line = (p, q) => {
+    if (!p || !q) return;
+    ctx.beginPath(); ctx.moveTo(p.x * W, p.y * H); ctx.lineTo(q.x * W, q.y * H); ctx.stroke();
+  };
+  ctx.save();
+  ctx.lineCap = 'round';
+  for (const side of ['L', 'R']) {
+    const tips = fr.hands[side];
+    if (!tips) continue;
+    const palm = fr.palms?.[side], fb = fr.fingerBones?.[side];
+    // 手全体の骨組み（白）
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 2;
+    if (palm) for (const b of PALM_BONES) line(palm[b.a], palm[b.b]);
+    if (fb) for (const b of FINGER_BONES) line(fb[b.a], fb[b.b]);
+    if (settings.showPalms && palm) {
+      ctx.strokeStyle = colorOf('palm'); ctx.lineWidth = 3;
+      for (const b of PALM_BONES) line(palm[b.a], palm[b.b]);
+    }
+    if (settings.showFingerBones && fb) {
+      ctx.strokeStyle = colorOf('fingerBone'); ctx.lineWidth = 3;
+      for (const b of FINGER_BONES) line(fb[b.a], fb[b.b]);
+    }
+    FINGERS.forEach((f, fi) => {
+      const p = tips[fi];
+      if (!p) return;
+      ctx.beginPath();
+      ctx.arc(p.x * W, p.y * H, Math.max(1.5, tipRadius(side, fi)), 0, Math.PI * 2);
+      ctx.fillStyle = colorOf(f.key); ctx.fill();
+      ctx.lineWidth = 1.5; ctx.strokeStyle = '#fff'; ctx.stroke();
+    });
+  }
+  if (fr.arms && settings.showArms) {
+    ctx.lineWidth = 4;
+    for (const b of ARM_BONES) { ctx.strokeStyle = colorOf(b.key); line(fr.arms[b.a], fr.arms[b.b]); }
+  }
+  if (fr.mouth) {
+    ctx.strokeStyle = colorOf('mouth'); ctx.lineWidth = 2;
+    for (const ring of [fr.mouth.outer, fr.mouth.inner]) {
+      ctx.beginPath();
+      ring.forEach((p, k) => k ? ctx.lineTo(p.x * W, p.y * H) : ctx.moveTo(p.x * W, p.y * H));
+      ctx.closePath(); ctx.stroke();
+    }
+  }
+  if (fr.face) {
+    ctx.fillStyle = colorOf('eye');
+    for (const p of fr.face) {
+      if (!p) continue;
+      ctx.beginPath(); ctx.arc(p.x * W, p.y * H, 4, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
 // 映像と検出結果（骨組み・指先の丸など）を左の画面に描き、左右を読み替えた結果を返す
 // results は Holistic と同じ形 { image, leftHandLandmarks, rightHandLandmarks, faceLandmarks, poseLandmarks }
 function renderPreview(results) {
@@ -380,66 +439,14 @@ function renderPreview(results) {
   const face      = results.faceLandmarks      || null;
   const pose      = results.poseLandmarks      || null;
 
-  camCtx.save();
-  if (mirrorX) { camCtx.translate(W, 0); camCtx.scale(-1, 1); }
+  // 指先の丸は、いまの速さで太く・細くする
   const nowT = performance.now();
   [['L', realLeft], ['R', realRight]].forEach(([side, hand]) => {
-    if (!hand) { liveSpeed[side] = null; return; }
-    drawConnectors(camCtx, hand, HAND_CONNECTIONS, { color: 'rgba(255,255,255,0.5)', lineWidth: 2 });
-    if (settings.showPalms) {
-      camCtx.strokeStyle = colorOf('palm'); camCtx.lineWidth = 3;
-      for (const bone of PALM_BONES) {
-        const p = hand[PALM_POINTS[bone.a].idx], q = hand[PALM_POINTS[bone.b].idx];
-        camCtx.beginPath(); camCtx.moveTo(p.x * W, p.y * H); camCtx.lineTo(q.x * W, q.y * H); camCtx.stroke();
-      }
-    }
-    if (settings.showFingerBones) {
-      camCtx.strokeStyle = colorOf('fingerBone'); camCtx.lineWidth = 3;
-      for (const bone of FINGER_BONES) {
-        const p = hand[FINGER_BONE_POINTS[bone.a].idx], q = hand[FINGER_BONE_POINTS[bone.b].idx];
-        camCtx.beginPath(); camCtx.moveTo(p.x * W, p.y * H); camCtx.lineTo(q.x * W, q.y * H); camCtx.stroke();
-      }
-    }
-    updateLiveSpeed(side, hand, nowT);
-    FINGERS.forEach((f, fi) => {
-      const p = hand[f.idx];
-      const r = settings.brushPx / 2 * speedToWidthRatio(liveSpeed[side].v[fi]);
-      camCtx.beginPath();
-      camCtx.arc(p.x * W, p.y * H, Math.max(1.5, r), 0, Math.PI * 2);
-      camCtx.fillStyle = colorOf(f.key); camCtx.fill();
-      camCtx.lineWidth = 1.5; camCtx.strokeStyle = '#fff'; camCtx.stroke();
-    });
+    if (hand) updateLiveSpeed(side, hand, nowT); else liveSpeed[side] = null;
   });
-  if (pose && settings.showArms) {
-    camCtx.lineWidth = 4; camCtx.lineCap = 'round';
-    for (const bone of ARM_BONES) {
-      const p = pose[ARM_POINTS[bone.a].idx], q = pose[ARM_POINTS[bone.b].idx];
-      if (p.visibility < MIN_VISIBILITY || q.visibility < MIN_VISIBILITY) continue;
-      camCtx.beginPath();
-      camCtx.moveTo(p.x * W, p.y * H);
-      camCtx.lineTo(q.x * W, q.y * H);
-      camCtx.strokeStyle = colorOf(bone.key); camCtx.stroke();
-    }
-  }
-  if (face) {
-    for (const ring of [LIP_OUTER, LIP_INNER]) {
-      camCtx.beginPath();
-      ring.forEach((i, k) => {
-        const p = face[i];
-        k ? camCtx.lineTo(p.x * W, p.y * H) : camCtx.moveTo(p.x * W, p.y * H);
-      });
-      camCtx.closePath();
-      camCtx.strokeStyle = colorOf('mouth'); camCtx.lineWidth = 2; camCtx.stroke();
-    }
-    FACE_POINTS.forEach(f => {
-      const p = face[f.idx];
-      if (!p) return;
-      camCtx.beginPath();
-      camCtx.arc(p.x * W, p.y * H, 4, 0, Math.PI * 2);
-      camCtx.fillStyle = colorOf(f.key); camCtx.fill();
-    });
-  }
-  camCtx.restore();
+  const fr = buildFrame(0, { realLeft, realRight, face, pose });
+  drawOverlay(camCtx, fr, W, H, (side, fi) =>
+    settings.brushPx / 2 * speedToWidthRatio(liveSpeed[side]?.v[fi] ?? 0));
   return { realLeft, realRight, face, pose };
 }
 
@@ -644,6 +651,7 @@ const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 // ── 記録制御 ──────────────────────────────────────────
 btnRec.onclick = () => {
   if (source === 'video') backToCamera();
+  clip = null;
   recDurationMs = Math.max(1, Math.min(30, +document.getElementById('dur').value || 5)) * 1000;
   phase = 'countdown';
   countdownEnd = performance.now() + COUNTDOWN_SEC * 1000;
@@ -653,6 +661,7 @@ btnRec.onclick = () => {
 
 function finishRecording() {
   phase = 'idle';
+  stopClipRecording();
   drawStrokes(frames);
   const detected = frames.filter(f => f.hands.L || f.hands.R).length;
   const faceDetected = frames.filter(f => f.face).length;
@@ -665,6 +674,7 @@ function setButtons(on) {
   btnVideo.disabled = !on;
   const has = on && frames.length > 0;
   btnReplay.disabled = !has; btnPng.disabled = !has; btnJson.disabled = !has;
+  btnProcess.disabled = !has || !clip;
 }
 
 // 記録した時間どおりにストロークを描き直す
@@ -754,6 +764,148 @@ function onTune() {
 }
 elSize.oninput = onTune; elContrast.oninput = onTune; elWidthVar.oninput = onTune; elShowArms.onchange = onTune; elShowPalms.onchange = onTune; elShowFingerBones.onchange = onTune; elArmAlpha.oninput = onTune;
 onTune();
+
+// ── 工程を動画で保存 ──────────────────────────────────────
+// 元の映像（カメラで記録した映像 or 読み込んだ動画）を再生しながら、
+// 左に映像・右にストロークが描かれていく様子を1本の動画に書き出す。
+// 書き出す時点の色・スライダーの設定が使われる
+let clip = null;          // { video, mirror, start, end }（秒）
+let clipRecorder = null, clipChunks = [];
+const clipVideo = document.createElement('video');
+clipVideo.muted = true; clipVideo.playsInline = true;
+clipVideo.setAttribute('playsinline', ''); clipVideo.setAttribute('muted', '');
+clipVideo.style.cssText = 'position:fixed; left:0; top:0; width:1px; height:1px; opacity:0; pointer-events:none;';
+document.body.appendChild(clipVideo);
+
+function pickMime(candidates) {
+  if (!window.MediaRecorder) return null;
+  return candidates.find(m => MediaRecorder.isTypeSupported(m)) ?? '';
+}
+
+// カメラで記録しているあいだ、カメラの映像もそのまま録画しておく
+function startClipRecording() {
+  clipRecorder = null; clipChunks = [];
+  const stream = video.srcObject;
+  const mime = pickMime(['video/webm;codecs=vp9', 'video/webm', 'video/mp4']);
+  if (!stream || mime === null) return;
+  try {
+    clipRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    clipRecorder.ondataavailable = e => { if (e.data.size) clipChunks.push(e.data); };
+    clipRecorder.start();
+  } catch { clipRecorder = null; }
+}
+function stopClipRecording() {
+  const rec = clipRecorder;
+  if (!rec) return;
+  const end = recDurationMs / 1000;
+  rec.onstop = () => {
+    if (clipVideo.src) URL.revokeObjectURL(clipVideo.src);
+    clipVideo.src = URL.createObjectURL(new Blob(clipChunks, { type: rec.mimeType }));
+    clip = { video: clipVideo, mirror: true, start: 0, end };
+    if (phase === 'idle') setButtons(true);
+  };
+  rec.stop();
+  clipRecorder = null;
+}
+
+function waitEvent(el, name, timeout = 5000) {
+  return new Promise(resolve => {
+    const done = () => { clearTimeout(timer); el.removeEventListener(name, done); resolve(); };
+    const timer = setTimeout(done, timeout);
+    el.addEventListener(name, done);
+  });
+}
+
+btnProcess.onclick = () => exportProcessVideo().catch(err => {
+  phase = 'idle';
+  drawStrokes(frames);
+  elStatus.textContent = '工程動画の書き出しでエラー: ' + err.message;
+  setButtons(true);
+});
+
+async function exportProcessVideo() {
+  if (!clip || !frames.length) return;
+  const outMime = pickMime(['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm']);
+  if (outMime === null) throw new Error('このブラウザは動画の書き出しに対応していません');
+  setButtons(false);
+  phase = 'exporting';
+  const src = clip.video;
+  if (src.readyState < 1) await waitEvent(src, 'loadedmetadata');
+
+  // 左：元の映像、右：ストローク（同じ大きさで横に並べる）
+  const w = cam.width, h = cam.height;
+  const out = document.createElement('canvas');
+  out.width = w * 2; out.height = h;
+  const oc = out.getContext('2d');
+  // 時刻 t（ミリ秒）の直前に記録したフレームの骨組みを、左の映像に重ねる
+  const frameAt = t => {
+    let i = -1;
+    for (let k = 0; k < frames.length && frames[k].t <= t; k++) i = k;
+    return i;
+  };
+  const tipRadiusAt = i => (side, fi) => {
+    const p = frames[i]?.hands[side]?.[fi], q = frames[i - 1]?.hands[side]?.[fi];
+    if (!p || !q) return settings.brushPx / 2;
+    const v = Math.hypot((p.x - q.x) * w / h, p.y - q.y) / (Math.max(1, frames[i].t - frames[i - 1].t) / 1000);
+    return settings.brushPx / 2 * speedToWidthRatio(v);
+  };
+  const drawComposite = t => {
+    oc.fillStyle = '#000'; oc.fillRect(0, 0, w, h);
+    oc.save();
+    if (clip.mirror) { oc.translate(w, 0); oc.scale(-1, 1); }
+    oc.drawImage(src, 0, 0, w, h);
+    oc.restore();
+    const i = t === Infinity ? frames.length - 1 : frameAt(t);
+    if (i >= 0) drawOverlay(oc, frames[i], w, h, tipRadiusAt(i));
+    drawStrokes(t === Infinity ? frames : frames.filter(f => f.t <= t));
+    oc.drawImage(art, w, 0, w, h);
+  };
+
+  const recorder = new MediaRecorder(out.captureStream(30), { ...(outMime ? { mimeType: outMime } : {}), videoBitsPerSecond: 8_000_000 });
+  const chunks = [];
+  recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+
+  src.pause();
+  src.currentTime = clip.start;
+  await waitEvent(src, 'seeked');
+  drawComposite(0);
+  recorder.start();
+  await src.play();
+
+  // 元の映像を普通の速さで再生しながら、そのときまでのストロークを描いていく
+  const length = clip.end - clip.start;
+  await new Promise(resolve => {
+    (function step() {
+      const now = src.currentTime - clip.start;
+      drawComposite(now * 1000);
+      elStatus.textContent = `工程動画を書き出し中… ${Math.min(100, Math.round(now / length * 100))}%（再生しながら書き出すので、映像と同じ時間がかかります）`;
+      if (now >= length || src.ended) { src.pause(); resolve(); }
+      else requestAnimationFrame(step);
+    })();
+  });
+
+  // 最後に完成した絵を少し見せてから終わる
+  const holdUntil = performance.now() + 1500;
+  await new Promise(resolve => {
+    (function hold() {
+      drawComposite(Infinity);
+      if (performance.now() < holdUntil) requestAnimationFrame(hold); else resolve();
+    })();
+  });
+  recorder.stop();
+  await waitEvent(recorder, 'stop');
+
+  const type = recorder.mimeType || outMime || 'video/webm';
+  const ext = type.includes('mp4') ? 'mp4' : 'webm';
+  const url = URL.createObjectURL(new Blob(chunks, { type }));
+  download(url, `body_stroke_process_${stamp()}.${ext}`);
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+
+  phase = 'idle';
+  drawStrokes(frames);
+  elStatus.textContent = `工程動画を保存しました（${ext}）`;
+  setButtons(true);
+}
 
 // ── 起動 ─────────────────────────────────────────────
 const camera = new Camera(video, {
@@ -871,6 +1023,7 @@ const MIN_RANGE = 0.5; // 範囲の最短（秒）
 let tasksPromise = null;
 
 async function openVideo(file) {
+  clip = null;
   setButtons(false);
   source = 'video';
   try { camera.stop(); } catch {}
@@ -994,6 +1147,7 @@ async function analyzeVideo(start, end) {
   tasksClock += Math.round(dur * 1000) + total + 1000;
 
   phase = 'idle';
+  clip = { video: fileVideo, mirror: false, start, end }; // 工程動画の書き出しに使う
   drawStrokes(frames);
   const handN = frames.filter(f => f.hands.L || f.hands.R).length;
   const faceN = frames.filter(f => f.face).length;
@@ -1004,6 +1158,7 @@ async function analyzeVideo(start, end) {
 
 // 動画モードからカメラに戻る（動画から作った絵は消える）
 function backToCamera() {
+  clip = null;
   source = 'camera';
   mirrorX = true;
   frames = []; liveSpeed.L = liveSpeed.R = null;
