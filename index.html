@@ -118,7 +118,7 @@
 </div>
 <div class="tune">
   <label>指先の点の大きさ<small>（ゆっくり時）</small>
-    <input id="size" type="range" min="1" max="20" step="0.5" value="6">
+    <input id="size" type="range" min="1" max="30" step="0.5" value="6">
     <span class="val" id="sizeVal"></span>
   </label>
   <label>太さの変化
@@ -134,6 +134,19 @@
   <label><input id="showArms" type="checkbox" checked> 肩・腕も描く</label>
   <label><input id="showPalms" type="checkbox" checked> 手のひらも描く</label>
   <label><input id="showFingerBones" type="checkbox" checked> 指の骨組みも描く</label>
+  <label><input id="brushMode" type="checkbox" checked> 筆のように描く（入り・抜き）</label>
+  <label>口の数
+    <input id="mouthCount" type="range" min="0" max="30" step="1" value="4">
+    <span class="val" id="mouthCountVal"></span>
+  </label>
+  <label>目の数
+    <input id="eyeCount" type="range" min="0" max="30" step="1" value="4">
+    <span class="val" id="eyeCountVal"></span>
+  </label>
+  <label>目の点の大きさ
+    <input id="eyeSize" type="range" min="1" max="20" step="0.5" value="3">
+    <span class="val" id="eyeSizeVal"></span>
+  </label>
   <label>肩・腕の濃さ
     <small>薄い</small>
     <input id="armAlpha" type="range" min="5" max="100" value="35">
@@ -217,7 +230,6 @@ const COLOR_LABELS = [
 // 口の形：唇の外側と内側の輪郭（1周、閉じた形）
 const LIP_OUTER = [61,146,91,181,84,17,314,405,321,375,291,409,270,269,267,0,37,39,40,185];
 const LIP_INNER = [78,95,88,178,87,14,317,402,318,324,308,415,310,311,312,13,82,81,80,191];
-const MOUTH_COUNT = 4;          // 記録時間のあいだに描く口の形の枚数（等間隔に間引く）
 
 // 速さ → 濃さ：止まっているほど濃く、すばやい動きほど薄く
 // 速さの単位は「画面の高さ／秒」
@@ -228,12 +240,15 @@ const SPEED_FAST  = 1.2;   // これ以上は「瞬間的な動き」→ いち�
 //  brushPx  : 指先の点の大きさ（画面上の px。描画キャンバスは2倍の解像度なので内部では ×2）
 //  widthVar : 太さの変化 0〜1（0=変化なし、1=すばやい動きは 1割の太さまで細くなる）
 //  contrast : 濃淡の強さ 0〜1（0=濃淡なし、1=すばやい動きはほぼ消える）
-const settings = { brushPx: 6, widthVar: 0.7, contrast: 0.8, showArms: true, showPalms: true, showFingerBones: true, armAlpha: 0.35, colors: { ...DEFAULT_COLORS } };
+const settings = { brushPx: 6, widthVar: 0.7, contrast: 0.8, showArms: true, showPalms: true, showFingerBones: true, brushMode: true, mouthCount: 4, eyeCount: 4, eyePx: 3, armAlpha: 0.35, colors: { ...DEFAULT_COLORS } };
 const colorOf = key => settings.colors[key] || DEFAULT_COLORS[key];
 
 // 速さ → 太さ：ゆっくりほど太く（= brushPx）、すばやいほど細く
+// 筆のように、ふつうの手の速さでもはっきり細くなるよう、濃さより敏感にする
+const WIDTH_SPEED_FAST = 0.6; // これ以上（画面の高さ／秒）で、いちばん細くなる
 function speedToWidthRatio(v) {
-  return 1 - 0.9 * settings.widthVar * speedRatio(v);
+  const r = Math.min(1, Math.max(0, (v - SPEED_STILL) / (WIDTH_SPEED_FAST - SPEED_STILL)));
+  return 1 - 0.9 * settings.widthVar * Math.pow(r, 0.7);
 }
 
 function speedRatio(v) {
@@ -477,10 +492,9 @@ function clearArt() {
   artCtx.fillRect(0, 0, art.width, art.height);
 }
 
-// 描く軌跡の一覧：両手×5指 ＋ 目
+// 描く軌跡の一覧：両手×5指（目と口は軌跡ではなく、決めた数だけその瞬間を描く）
 const TRACKS = [
   ...['L', 'R'].flatMap(side => FINGERS.map((f, i) => ({ key: f.key, get: fr => fr.hands[side]?.[i] }))),
-  ...FACE_POINTS.map((f, i) => ({ key: f.key, get: fr => fr.face?.[i] })),
 ];
 
 // frames を受け取り、各軌跡を滑らかな線で描く。見失われたフレームで線を切る。
@@ -515,6 +529,7 @@ function drawStrokes(fs) {
   }
   for (const tr of TRACKS) drawTrack(tr, fs, artCtx);
   drawMouths(fs);
+  drawEyes(fs);
 }
 
 // 肩・腕は毎フレームの骨組み（線）を重ねて描く。止まっているほど重なって濃く、すばやいほど薄く
@@ -569,17 +584,52 @@ function drawTrack(tr, fs, ctx) {
 
 // 口は毎フレームの形を重ねて描く（形の変化が残像のように積み重なる）
 // 口が止まっている（位置も形も変わらない）ほど濃く、すばやく動くほど薄く
+// 記録時間を count で割った間隔ごとに1つだけ選ぶ（再生中も同じフレームが選ばれるよう時間で決める）
+function snapshotPicker(count) {
+  if (count <= 0) return () => false;
+  const interval = recDurationMs / count;
+  let nextT = 0;
+  return fr => {
+    if (fr.t < nextT) return false;
+    while (nextT <= fr.t) nextT += interval; // 等間隔の時刻（0, interval, 2×interval…）で選ぶ
+    return true;
+  };
+}
+
+// 目は、決めた数だけ「その瞬間の黒目の位置」を点で描く。止まっているほど濃く、すばやいほど薄く
+// 点の大きさは「目の点の大きさ」スライダーだけで決まる（指先の点の大きさや速さによる太さの変化とは連動しない）
+function drawEyes(fs) {
+  const W = art.width, H = art.height;
+  const pickNow = snapshotPicker(settings.eyeCount);
+  const r = settings.eyePx / 2 * (art.width / cam.width); // eyePx は直径（画面上の px）
+  artCtx.save();
+  artCtx.fillStyle = colorOf('eye');
+  let prev = null;
+  for (const fr of fs) {
+    if (!fr.face || !fr.face.some(Boolean)) { prev = null; continue; }
+    if (pickNow(fr)) {
+      fr.face.forEach((p, i) => {
+        if (!p) return;
+        const q = prev?.face?.[i];
+        const v = q ? Math.hypot((p.x - q.x) * W / H, p.y - q.y) / (Math.max(1, fr.t - prev.t) / 1000) : 0;
+        artCtx.globalAlpha = speedToAlpha(v);
+        artCtx.beginPath(); artCtx.arc(p.x * W, p.y * H, r, 0, Math.PI * 2); artCtx.fill();
+      });
+    }
+    prev = fr;
+  }
+  artCtx.restore();
+}
+
 function drawMouths(fs) {
   const W = art.width, H = art.height;
   artCtx.save();
-  artCtx.strokeStyle = colorOf('mouth'); artCtx.lineWidth = 2;
-  // 記録時間を枚数で割った間隔ごとに1枚だけ描く（再生中も同じフレームが選ばれるよう時間で決める）
-  const interval = recDurationMs / MOUTH_COUNT;
-  let prev = null, nextT = 0;
+  artCtx.strokeStyle = colorOf('mouth'); artCtx.lineWidth = 2; // 口の線の太さは固定（画面上で 1px）
+  const pickNow = snapshotPicker(settings.mouthCount);
+  let prev = null;
   for (const fr of fs) {
     if (!fr.mouth) { prev = null; continue; }
-    const draw = fr.t >= nextT;
-    if (draw) nextT = fr.t + interval;
+    const draw = pickNow(fr);
     let v = 0;
     if (prev) {
       // 輪郭の各点の移動量の平均（画面の高さ／秒）
@@ -630,6 +680,7 @@ function strokeSmooth(pts, ctx = artCtx) {
     const w = raw.slice(Math.max(0, i - 2), i + 3);
     return w.reduce((a, b) => a + b, 0) / w.length;
   });
+  if (settings.brushMode) return strokeBrush(pts, speeds, ctx);
   ctx.save();
   for (let i = 1; i < pts.length; i++) {
     const p0 = pts[i - 1], p1 = pts[i];
@@ -645,6 +696,76 @@ function strokeSmooth(pts, ctx = artCtx) {
   }
   ctx.restore();
 }
+// ── 筆の描き方 ──
+// 線を「太さがなめらかに変わる1本の帯」として塗る。
+// ・点と点のあいだを曲線（Catmull-Rom）で細かく補間し、太さと濃さも補間する
+// ・描き始めと描き終わりを細くして、筆の入り・抜きを出す
+// ・濃さが同じ区間はまとめて1つの形で塗る（つなぎ目に粒や線が出ないように）
+const BRUSH_STEPS = 6;         // 点と点のあいだを何分割するか
+const BRUSH_TAPER = 3;         // 入り・抜きの長さ（最大の太さの何倍か）
+const BRUSH_TAPER_MIN = 0.15;  // 入り・抜きのいちばん細いところ（最大の太さに対する割合）
+const ALPHA_STEP = 0.04;       // 濃さをこの刻みでまとめて塗る
+
+function catmull(p0, p1, p2, p3, t) {
+  const t2 = t * t, t3 = t2 * t;
+  const f = (a, b, c, d) => 0.5 * (2 * b + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3);
+  return { x: f(p0.x, p1.x, p2.x, p3.x), y: f(p0.y, p1.y, p2.y, p3.y) };
+}
+
+function strokeBrush(pts, speeds, ctx) {
+  const maxW = brushWidth();
+  // 1) 細かく補間した中心線（位置・速さ）
+  const s = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || pts[i + 1];
+    for (let k = 0; k < BRUSH_STEPS; k++) {
+      const t = k / BRUSH_STEPS;
+      s.push({ ...catmull(p0, p1, p2, p3, t), v: speeds[i] + (speeds[i + 1] - speeds[i]) * t });
+    }
+  }
+  s.push({ x: pts[pts.length - 1].x, y: pts[pts.length - 1].y, v: speeds[pts.length - 1] });
+
+  // 2) 線の長さに沿った位置（入り・抜きに使う）
+  let total = 0;
+  s.forEach((p, j) => { if (j) total += Math.hypot(p.x - s[j - 1].x, p.y - s[j - 1].y); p.d = total; });
+  const taperLen = Math.min(maxW * BRUSH_TAPER, total / 2);
+
+  // 3) 各点の半径・濃さと、左右の縁
+  s.forEach((p, j) => {
+    let r = maxW / 2 * speedToWidthRatio(p.v);
+    if (taperLen > 0) {
+      const edge = Math.min(p.d, total - p.d) / taperLen; // 端からの近さ 0〜1
+      if (edge < 1) r *= BRUSH_TAPER_MIN + (1 - BRUSH_TAPER_MIN) * Math.sin(edge * Math.PI / 2);
+    }
+    r = Math.max(0.4, r);
+    p.a = Math.round(speedToAlpha(p.v) / ALPHA_STEP) * ALPHA_STEP;
+    const a = s[Math.max(0, j - 1)], b = s[Math.min(s.length - 1, j + 1)];
+    let nx = -(b.y - a.y), ny = b.x - a.x;
+    const len = Math.hypot(nx, ny) || 1;
+    nx /= len; ny /= len;
+    p.l = { x: p.x + nx * r, y: p.y + ny * r };
+    p.r = { x: p.x - nx * r, y: p.y - ny * r };
+  });
+
+  // 4) 濃さが同じ区間ごとに、帯の形を塗る
+  ctx.save();
+  ctx.fillStyle = ctx.strokeStyle;
+  let from = 0;
+  for (let j = 1; j <= s.length; j++) {
+    if (j < s.length && s[j].a === s[from].a) continue;
+    const run = s.slice(from, Math.min(j + 1, s.length)); // 次の区間と1点重ねて隙間をなくす
+    ctx.globalAlpha = s[from].a;
+    ctx.beginPath();
+    ctx.moveTo(run[0].l.x, run[0].l.y);
+    for (const p of run) ctx.lineTo(p.l.x, p.l.y);
+    for (let k = run.length - 1; k >= 0; k--) ctx.lineTo(run[k].r.x, run[k].r.y);
+    ctx.closePath();
+    ctx.fill();
+    from = j;
+  }
+  ctx.restore();
+}
+
 const brushWidth = () => settings.brushPx * (art.width / cam.width);
 const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 
@@ -703,7 +824,8 @@ btnJson.onclick = () => {
     palmPoints: PALM_POINTS.map(f => f.idx), palmColor: colorOf('palm'),
     fingerBonePoints: FINGER_BONE_POINTS.map(f => f.idx), fingerBoneColor: colorOf('fingerBone'),
     armBones: ARM_BONES.map(b => ({ from: ARM_POINTS[b.a].idx, to: ARM_POINTS[b.b].idx, color: colorOf(b.key) })),
-    mouth: { outerLandmarks: LIP_OUTER, innerLandmarks: LIP_INNER, color: colorOf('mouth'), drawCount: MOUTH_COUNT },
+    mouth: { outerLandmarks: LIP_OUTER, innerLandmarks: LIP_INNER, color: colorOf('mouth'), drawCount: settings.mouthCount },
+    eyeDrawCount: settings.eyeCount,
     note: '座標は 0..1 正規化・表示に合わせて左右反転済み。L/R は本人から見た左右',
     frames,
   };
@@ -719,6 +841,9 @@ const elWidthVar = document.getElementById('widthVar');
 const elShowArms = document.getElementById('showArms');
 const elShowPalms = document.getElementById('showPalms');
 const elShowFingerBones = document.getElementById('showFingerBones');
+const elBrushMode = document.getElementById('brushMode');
+const elMouthCount = document.getElementById('mouthCount'), elEyeCount = document.getElementById('eyeCount');
+const elEyeSize = document.getElementById('eyeSize');
 const elArmAlpha = document.getElementById('armAlpha');
 try {
   const saved = JSON.parse(localStorage.getItem('bodyStrokeSettings') || '{}');
@@ -744,6 +869,8 @@ elWidthVar.value = Math.round(settings.widthVar * 100);
 elShowArms.checked = settings.showArms;
 elShowPalms.checked = settings.showPalms;
 elShowFingerBones.checked = settings.showFingerBones;
+elBrushMode.checked = settings.brushMode;
+elMouthCount.value = settings.mouthCount; elEyeCount.value = settings.eyeCount; elEyeSize.value = settings.eyePx;
 elArmAlpha.value = Math.round(settings.armAlpha * 100);
 
 function onTune() {
@@ -753,6 +880,13 @@ function onTune() {
   settings.showArms = elShowArms.checked;
   settings.showPalms = elShowPalms.checked;
   settings.showFingerBones = elShowFingerBones.checked;
+  settings.brushMode = elBrushMode.checked;
+  settings.mouthCount = +elMouthCount.value;
+  settings.eyeCount = +elEyeCount.value;
+  settings.eyePx = +elEyeSize.value;
+  document.getElementById('eyeSizeVal').textContent = settings.eyePx + 'px';
+  document.getElementById('mouthCountVal').textContent = settings.mouthCount ? settings.mouthCount + '回' : '描かない';
+  document.getElementById('eyeCountVal').textContent = settings.eyeCount ? settings.eyeCount + '回' : '描かない';
   settings.armAlpha = +elArmAlpha.value / 100;
   elSizeVal.textContent = settings.brushPx + 'px';
   try { localStorage.setItem('bodyStrokeSettings', JSON.stringify(settings)); } catch {}
@@ -762,7 +896,7 @@ function onTune() {
     else clearArt();
   }
 }
-elSize.oninput = onTune; elContrast.oninput = onTune; elWidthVar.oninput = onTune; elShowArms.onchange = onTune; elShowPalms.onchange = onTune; elShowFingerBones.onchange = onTune; elArmAlpha.oninput = onTune;
+elSize.oninput = onTune; elContrast.oninput = onTune; elWidthVar.oninput = onTune; elShowArms.onchange = onTune; elShowPalms.onchange = onTune; elShowFingerBones.onchange = onTune; elBrushMode.onchange = onTune; elMouthCount.oninput = onTune; elEyeCount.oninput = onTune; elEyeSize.oninput = onTune; elArmAlpha.oninput = onTune;
 onTune();
 
 // ── 工程を動画で保存 ──────────────────────────────────────
