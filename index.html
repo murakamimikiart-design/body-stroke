@@ -42,6 +42,15 @@
   .legend input[type=color]::-webkit-color-swatch { border: none; border-radius: 50%; }
   .legend button { font-size: 12px; padding: 4px 10px; }
   #video { display: none; }
+  .mode-switch { display: flex; gap: 0; margin: 0 0 12px; border: 1px solid rgba(255,255,255,.18); border-radius: 8px; overflow: hidden; }
+  .mode-switch[hidden] { display: none; }
+  .mode-switch button { border: none; border-radius: 0; padding: 8px 18px; background: transparent; }
+  .mode-switch button.on { background: #e5e7eb; color: #111318; font-weight: bold; }
+  /* 習字モード：筆に関係する設定だけを出す */
+  body.shuji .full-only, body:not(.shuji) .shuji-only { display: none; }
+  body.shuji .tune > label:not(.shuji-show) { display: none; }
+  body.shuji .legend label:not(.shuji-show) { display: none; }
+  body.shuji #saveJson { display: none; }
   .range-panel { margin-top: 12px; padding: 12px 16px; border-radius: 10px; background: #1a1e27;
                  display: flex; flex-direction: column; gap: 10px; width: min(480px, 100%); }
   .range-panel[hidden] { display: none; }
@@ -80,7 +89,11 @@
 </style>
 </head>
 <body>
-<h1>Body Stroke — 指先で描く</h1>
+<h1 id="title">Body Stroke — 指先で描く</h1>
+<div class="mode-switch">
+  <button type="button" data-mode="shuji">習字</button>
+  <button type="button" data-mode="full">すべての設定</button>
+</div>
 
 <div class="stage">
   <div class="panel">
@@ -118,6 +131,15 @@
   </div>
 </div>
 <div class="tune">
+  <label>背景
+    <select id="bgMode">
+      <option value="solid">単色</option>
+      <option value="vertical">グラデーション（上から下へ）</option>
+      <option value="horizontal">グラデーション（左から右へ）</option>
+      <option value="diagonal">グラデーション（斜め）</option>
+      <option value="radial">グラデーション（中心から外へ）</option>
+    </select>
+  </label>
   <label>描き方
     <select id="drawMode">
       <option value="lines">線（ストローク）</option>
@@ -135,9 +157,24 @@
   </label>
   <label><input id="photoHands" type="checkbox" checked> 手（人）を写す</label>
   <label><input id="photoObject" type="checkbox" checked> 物を写す</label>
-  <label>指先の点の大きさ<small>（ゆっくり時）</small>
+  <label><span class="full-only">指先の点の大きさ</span><span class="shuji-only">筆の太さ</span><small>（ゆっくり時）</small>
     <input id="size" type="range" min="1" max="30" step="0.5" value="6">
     <span class="val" id="sizeVal"></span>
+  </label>
+  <label>人差し指の太さ
+    <input id="indexWidth" type="range" min="0.5" max="5" step="0.25" value="1">
+    <span class="val" id="indexWidthVal"></span>
+  </label>
+  <label>奥行きの効き<small>（近いと太く）</small>
+    <input id="depthGain" type="range" min="0" max="100" step="5" value="0">
+    <span class="val" id="depthGainVal"></span>
+  </label>
+  <label><input id="checkHandShape" type="checkbox" checked> 手の形の確認（ありえない形の手を捨てる）</label>
+  <label>指先の線
+    <select id="fingerShow">
+      <option value="all">5本すべて</option>
+      <option value="index">人差し指だけ</option>
+    </select>
   </label>
   <label>太さの変化
     <small>弱い</small>
@@ -221,6 +258,10 @@
 <video id="video" playsinline muted autoplay></video>
 
 <script>
+// このページのモード。'full' = Body Stroke（体のストローク）、'shuji' = Air Shuji（人差し指で書く習字）。
+// 同じコードを2つのリポジトリで使い、この1行だけを変える（null にすると、画面上で切り替えられる）
+const APP_MODE = 'full';
+
 // ── 設定 ──────────────────────────────────────────────
 // MediaPipe Hand のランドマーク番号: 4=親指, 8=人差し指, 12=中指, 16=薬指, 20=小指
 const FINGERS = [
@@ -323,6 +364,7 @@ const DEFAULT_COLORS = {
   foot:     '#c4ccd8', // 足：薄いグレー（手のひらと同じ）
   object:   '#000000', // 物体（犬など）の輪郭：黒
   background: '#ffffff', // ストローク画面の背景：白
+  background2: '#d6d3d1', // グラデーションの2色目：薄いグレー
 };
 const COLOR_LABELS = [
   ...FINGERS.map(f => ({ key: f.key, name: f.name })),
@@ -332,7 +374,7 @@ const COLOR_LABELS = [
   { key: 'toe', name: 'つま先' }, { key: 'torso', name: '体幹（肩〜腰）' }, { key: 'thigh', name: '太もも' },
   { key: 'shin', name: 'すね' }, { key: 'foot', name: '足' },
   { key: 'object', name: '物体の輪郭' },
-  { key: 'background', name: '背景' },
+  { key: 'background', name: '背景' }, { key: 'background2', name: '背景2（グラデーション）' },
 ];
 // 口の形：唇の外側と内側の輪郭（1周、閉じた形）
 const LIP_OUTER = [61,146,91,181,84,17,314,405,321,375,291,409,270,269,267,0,37,39,40,185];
@@ -347,7 +389,7 @@ const SPEED_FAST  = 1.2;   // これ以上は「瞬間的な動き」→ いち�
 //  brushPx  : 指先の点の大きさ（画面上の px。描画キャンバスは2倍の解像度なので内部では ×2）
 //  widthVar : 太さの変化 0〜1（0=変化なし、1=すばやい動きは 1割の太さまで細くなる）
 //  contrast : 濃淡の強さ 0〜1（0=濃淡なし、1=すばやい動きはほぼ消える）
-const settings = { brushPx: 6, widthVar: 0.7, contrast: 0.8, showHuman: true, verifyHuman: true, showArms: true, showLegs: true, showPalms: true, showFingerBones: true, brushMode: true, drawMode: 'lines', photoCount: 12, photoAlpha: 30, photoHands: true, photoObject: true, mouthCount: 4, eyeCount: 4, eyePx: 3, objectClass: COLOR_CLASS, objectCount: 0, objectSensitivity: 50, objectLinePx: 1.5, objectStyle: 'line', objectFillAlpha: 40, contactMode: 'off', contactOffAlpha: 20, contactDist: 3, armAlpha: 0.35, colors: { ...DEFAULT_COLORS } };
+const settings = { brushPx: 6, widthVar: 0.7, contrast: 0.8, showHuman: true, verifyHuman: true, showArms: true, showLegs: true, showPalms: true, showFingerBones: true, brushMode: true, bgMode: 'solid', indexWidthMul: 1, fingerShow: 'all', depthGain: 0, checkHandShape: true, drawMode: 'lines', photoCount: 12, photoAlpha: 30, photoHands: true, photoObject: true, mouthCount: 4, eyeCount: 4, eyePx: 3, objectClass: COLOR_CLASS, objectCount: 0, objectSensitivity: 50, objectLinePx: 1.5, objectStyle: 'line', objectFillAlpha: 40, contactMode: 'off', contactOffAlpha: 20, contactDist: 3, armAlpha: 0.35, colors: { ...DEFAULT_COLORS } };
 const colorOf = key => settings.colors[key] || DEFAULT_COLORS[key];
 
 // 速さ → 太さ：ゆっくりほど太く（= brushPx）、すばやいほど細く
@@ -458,7 +500,8 @@ function onResults(results) {
   fitCanvasesTo(results.image);
   // カメラでも、モデルが読み込まれていれば、物体の輪郭と「人の確認」を行う
   const wantObj = settings.objectCount > 0 && !isTapLike(settings.objectClass);
-  if (tasks?.seg && (wantObj || settings.verifyHuman)) {
+  // （輪郭を取らないときは、処理を軽くしてコマ数を保つため、人の確認も含めて画像の解析をしない）
+  if (tasks?.seg && wantObj) {
     const sf = segmentFrame(video, nextTs(performance.now()), wantObj ? settings.objectClass : null);
     if (wantObj) results.objectGrid = sf.grid;
     verifyHuman(results, sf.person);
@@ -471,7 +514,7 @@ function onResults(results) {
     if (remain > 0) {
       overlayText(String(remain), 160);
     } else {
-      phase = 'recording'; recStart = now; frames = [];
+      phase = 'recording'; recStart = now; frames = []; rejectedHands = 0;
       startClipRecording();
       clearArt();
     }
@@ -489,16 +532,84 @@ function onResults(results) {
 }
 
 // 検出結果から、記録する1フレーム分のデータを作る
+// ── カメラの方を向いた指（潰れて見える指）の先は使わない ──
+// 指をカメラに向けると、画面の上では指が短く潰れて見え、指の先の位置を当てられない（手のひらや付け根に付いてしまう）。
+// 画面上の指の長さが、手のひらの長さ（手首〜中指の付け根）に比べて FORESHORTEN_MIN より短いときは、その指の先を使わない
+const FORESHORTEN_MIN = 0.35;
+const FINGER_BASES = [1, 5, 9, 13, 17]; // 親指〜小指の付け根
+function fingerTips(hand) {
+  const tips = pick(hand, FINGERS);
+  if (!tips) return null;
+  const W = cam.width, H = cam.height;
+  const d = (a, b) => Math.hypot((hand[a].x - hand[b].x) * W, (hand[a].y - hand[b].y) * H);
+  const palm = d(0, 9);
+  if (palm < 1) return tips;
+  FINGERS.forEach((f, i) => {
+    if (i === 0) return; // 親指は向きの変化が大きく、短く見えるのが普通なので確かめない
+    const b = FINGER_BASES[i];
+    const len = d(b, b + 1) + d(b + 1, b + 2) + d(b + 2, b + 3);
+    if (len / palm < FORESHORTEN_MIN) tips[i] = null;
+  });
+  return tips;
+}
+
 function buildFrame(t, { realLeft, realRight, face, pose, objectGrid }) {
   return {
     t,
     objectGrid: objectGrid || null, // 選んだ種類の「可能性」のマス（輪郭は描くときに感度で取り出す）
-    hands: { L: pick(realLeft, FINGERS), R: pick(realRight, FINGERS) },
+    hands: { L: fingerTips(realLeft), R: fingerTips(realRight) },
     face: pick(face, FACE_POINTS), mouth: mouthShape(face), arms: pick(pose, ARM_POINTS, MIN_VISIBILITY),
     legs: pick(pose, LEG_POINTS, LEG_MIN_VISIBILITY),
     palms: { L: pick(realLeft, PALM_POINTS), R: pick(realRight, PALM_POINTS) },
     fingerBones: { L: pick(realLeft, FINGER_BONE_POINTS), R: pick(realRight, FINGER_BONE_POINTS) },
   };
+}
+
+// ── 手の形の確認（z を使った3次元の長さ） ──
+// 手の点の x・y・z から指の骨の長さを3次元で測り、手のひらの長さ（手首〜中指の付け根）と比べる。
+// 指が手のひらに比べてありえないほど長い・短い手は、見間違えとして捨てる。
+// （z は x と同じくらいの縮尺の「手首から見た奥行き」。画面の向きで縮んで見える指も、3次元なら長さが保たれる）
+const FINGER_CHAINS = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20]];
+const FINGER_RANGE = [[0.5, 1.9], [0.45, 1.6], [0.5, 1.7], [0.45, 1.6], [0.35, 1.35]]; // 親指〜小指：指の長さ ÷ 手のひらの長さ
+let rejectedHands = 0; // 捨てた手の数（解析ごとに数え直す）
+function plausibleHand(h, W, H) {
+  const P = i => ({ x: h[i].x * W, y: h[i].y * H, z: (h[i].z || 0) * W });
+  const d3 = (a, b) => { const p = P(a), q = P(b); return Math.hypot(p.x - q.x, p.y - q.y, p.z - q.z); };
+  const palm = d3(0, 9);
+  if (palm < 1) return false;
+  let bad = 0;
+  FINGER_CHAINS.forEach((c, f) => {
+    const len = d3(0, c[0]) * (f === 0 ? 1 : 0) + d3(c[0], c[1]) + d3(c[1], c[2]) + d3(c[2], c[3]);
+    const r = len / palm;
+    if (r < FINGER_RANGE[f][0] || r > FINGER_RANGE[f][1]) bad++;
+  });
+  // 手のひらの幅（人差し指の付け根〜小指の付け根）も確認
+  const width = d3(5, 17) / palm;
+  if (width < 0.35 || width > 1.3) bad++;
+  return bad < 2; // 2か所以上おかしければ、見間違えとみなす
+}
+
+// ── 同じ手の二重検出を1つにまとめる ──
+// MediaPipe は、1つの手を「左手」と「右手」の両方として検出することがある。
+// ずれた方の骨組みの「人差し指の先」が別の指の上に来て、線が混ざる原因になるので、片方だけを残す
+const DUP_HAND_DIST = 0.08; // 手のひらの中心どうしがこれより近ければ同じ手（画面の幅・高さに対する割合）
+let lastHandSide = null;     // 前のコマで残した側（'L' | 'R'）
+function palmCenter(h) {
+  let x = 0, y = 0;
+  for (const i of [0, 5, 9, 13, 17]) { x += h[i].x; y += h[i].y; }
+  return { x: x / 5, y: y / 5 };
+}
+function handSpread(h) { // 手首〜中指の付け根と、人差し指〜小指の付け根の長さ（形が潰れているほど小さい）
+  return Math.hypot(h[9].x - h[0].x, h[9].y - h[0].y) + Math.hypot(h[17].x - h[5].x, h[17].y - h[5].y);
+}
+function dedupeHands(L, R) {
+  if (!L || !R) { lastHandSide = L ? 'L' : R ? 'R' : lastHandSide; return [L, R]; }
+  const a = palmCenter(L), b = palmCenter(R);
+  if (Math.hypot(a.x - b.x, a.y - b.y) > DUP_HAND_DIST) { lastHandSide = null; return [L, R]; }
+  // 前のコマで続いていた方を残す（なければ、形がより大きく広がっている方）
+  const keep = lastHandSide || (handSpread(L) >= handSpread(R) ? 'L' : 'R');
+  lastHandSide = keep;
+  return keep === 'L' ? [L, null] : [null, R];
 }
 
 // 記録した1フレーム分のデータ（座標は表示の向きにそろえ済み）から、
@@ -530,8 +641,8 @@ function drawOverlay(ctx, fr, W, H, tipRadius) {
     }
     FINGERS.forEach((f, fi) => {
       const p = tips[fi];
-      if (!p) return;
-      const r = Math.max(1.5, tipRadius(side, fi));
+      if (!p || !fingerVisible(fi)) return;
+      const r = Math.max(1.5, tipRadius(side, fi) * fingerWidthMul(fi));
       ctx.beginPath();
       ctx.arc(p.x * W, p.y * H, r, 0, Math.PI * 2);
       ctx.fillStyle = colorOf(f.key); ctx.fill();
@@ -558,7 +669,7 @@ function drawOverlay(ctx, fr, W, H, tipRadius) {
       ctx.lineWidth = 1.5; ctx.strokeStyle = '#fff'; ctx.stroke();
     }
   }
-  if (human && fr.mouth) {
+  if (human && fr.mouth && settings.mouthCount > 0) {
     ctx.strokeStyle = colorOf('mouth'); ctx.lineWidth = 2;
     for (const ring of [fr.mouth.outer, fr.mouth.inner]) {
       ctx.beginPath();
@@ -575,7 +686,7 @@ function drawOverlay(ctx, fr, W, H, tipRadius) {
       ctx.closePath(); ctx.stroke();
     }
   }
-  if (human && fr.face) {
+  if (human && fr.face && settings.eyeCount > 0) {
     ctx.fillStyle = colorOf('eye');
     for (const p of fr.face) {
       if (!p) continue;
@@ -596,8 +707,13 @@ function renderPreview(results) {
   camCtx.restore();
 
   // 注意: MediaPipe の左右ラベルは鏡映入力前提なので、実際の左右と入れ替わる（JSL_app と同じ扱い）
-  const realRight = results.leftHandLandmarks  || null;
-  const realLeft  = results.rightHandLandmarks || null;
+  let realRight = results.leftHandLandmarks  || null;
+  let realLeft  = results.rightHandLandmarks || null;
+  if (settings.checkHandShape) {
+    if (realLeft && !plausibleHand(realLeft, W, H)) { realLeft = null; rejectedHands++; }
+    if (realRight && !plausibleHand(realRight, W, H)) { realRight = null; rejectedHands++; }
+  }
+  [realLeft, realRight] = dedupeHands(realLeft, realRight);
   const face      = results.faceLandmarks      || null;
   const pose      = results.poseLandmarks      || null;
 
@@ -610,7 +726,47 @@ function renderPreview(results) {
   const fr = buildFrame(0, { realLeft, realRight, face, pose, objectGrid });
   drawOverlay(camCtx, fr, W, H, (side, fi) =>
     settings.brushPx / 2 * speedToWidthRatio(liveSpeed[side]?.v[fi] ?? 0));
+  if (mode === 'shuji') drawDistanceGuide(realLeft || realRight, W, H);
   return { realLeft, realRight, face, pose, objectGrid };
+}
+
+// ── 距離の案内（習字モード） ──
+// 手の大きさ（手の点を囲む四角の長い方の辺 ÷ 画面の高さ）で、カメラとの距離がちょうどいいかを判定し、
+// カメラ画面のふちの色と短い文字で知らせる。人差し指がカメラの方を向いて潰れて見えるときも知らせる
+const GUIDE_FAR = 0.18;    // これより小さく映ると「遠すぎ」
+const GUIDE_NEAR = 0.55;   // これより大きく映ると「近すぎ」
+const GUIDE_EDGE = 0.03;   // 手の点が画面の端からこれ以内にあると「はみ出しそう」
+let guideSize = null;      // 手の大きさ（ちらつかないよう、なめらかにした値）
+function drawDistanceGuide(hand, W, H) {
+  let color, text;
+  if (!hand) {
+    guideSize = null;
+    color = '#9ca3af'; text = '手が見えません。手全体を映してください';
+  } else {
+    let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+    for (const p of hand) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+    const size = Math.max((x1 - x0) * W / H, y1 - y0);
+    guideSize = guideSize == null ? size : guideSize * 0.7 + size * 0.3;
+    const edge = x0 < GUIDE_EDGE || y0 < GUIDE_EDGE || x1 > 1 - GUIDE_EDGE || y1 > 1 - GUIDE_EDGE;
+    const tips = fingerTips(hand);
+    if (guideSize > GUIDE_NEAR) { color = '#ef4444'; text = '近すぎます。少し離れてください'; }
+    else if (edge) { color = '#f59e0b'; text = '手が画面の端にかかっています'; }
+    else if (guideSize < GUIDE_FAR) { color = '#f59e0b'; text = '遠すぎます。少し近づいてください'; }
+    else if (!tips?.[INDEX_FINGER]) { color = '#f59e0b'; text = '人差し指をカメラに向けず、上か横に向けてください'; }
+    else { color = '#22c55e'; text = 'ちょうどいい距離です'; }
+  }
+  camCtx.save();
+  camCtx.lineWidth = 8; camCtx.strokeStyle = color;
+  camCtx.strokeRect(4, 4, W - 8, H - 8);
+  camCtx.font = 'bold 18px Hiragino Sans, sans-serif';
+  const tw = camCtx.measureText(text).width;
+  const bx = (W - tw) / 2 - 12, by = H - 46;
+  camCtx.fillStyle = 'rgba(0,0,0,0.6)';
+  camCtx.fillRect(bx, by, tw + 24, 30);
+  camCtx.fillStyle = color === '#9ca3af' ? '#fff' : color;
+  camCtx.textAlign = 'center'; camCtx.textBaseline = 'middle';
+  camCtx.fillText(text, W / 2, by + 15);
+  camCtx.restore();
 }
 
 function overlayText(txt, size, pos = 'center') {
@@ -635,10 +791,25 @@ armLayer.width = art.width; armLayer.height = art.height;
 const armCtx = armLayer.getContext('2d');
 
 // ── ストローク描画 ─────────────────────────────────────
+// 背景：単色か、「背景」→「背景2」へのグラデーション
 function clearArt() {
-  artCtx.fillStyle = colorOf('background');
-  artCtx.fillRect(0, 0, art.width, art.height);
+  const W = art.width, H = art.height, c1 = colorOf('background'), c2 = colorOf('background2');
+  let fill = c1;
+  if (settings.bgMode !== 'solid') {
+    const g = settings.bgMode === 'radial'
+      ? artCtx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.hypot(W, H) / 2)
+      : artCtx.createLinearGradient(0, 0, settings.bgMode === 'vertical' ? 0 : W, settings.bgMode === 'horizontal' ? 0 : H);
+    g.addColorStop(0, c1); g.addColorStop(1, c2);
+    fill = g;
+  }
+  artCtx.fillStyle = fill;
+  artCtx.fillRect(0, 0, W, H);
 }
+
+// 人差し指（FINGERS の 1 番目）だけを太くする・人差し指だけを表示する
+const INDEX_FINGER = 1;
+const fingerVisible = i => settings.fingerShow !== 'index' || i === INDEX_FINGER;
+const fingerWidthMul = i => i === INDEX_FINGER ? settings.indexWidthMul : 1;
 
 // 描く軌跡の一覧：両手×5指（目と口は軌跡ではなく、決めた数だけその瞬間を描く）
 const TRACKS = [
@@ -649,6 +820,7 @@ const TRACKS = [
 // frames を受け取り、各軌跡を滑らかな線で描く。見失われたフレームで線を切る。
 function drawStrokes(fs) {
   clearArt();
+  if (settings.depthGain > 0) updateDepthBase();
   const W = art.width, H = art.height;
   // 連続写真：そのときまでの写真を重ねる（線だけのときは描かない）
   if (settings.drawMode !== 'lines') drawPhotos(fs.length ? fs[fs.length - 1].t : -1);
@@ -686,7 +858,11 @@ function drawStrokes(fs) {
     artCtx.restore();
   }
   if (settings.showHuman) {
-    for (const tr of TRACKS) if (!tr.legs || settings.showLegs) drawTrack(tr, fs, artCtx);
+    for (const tr of TRACKS) {
+      if (tr.legs && !settings.showLegs) continue;
+      if (tr.finger && !fingerVisible(tr.i)) continue;
+      drawTrack(tr, fs, artCtx);
+    }
     drawMouths(fs);
     drawEyes(fs);
   }
@@ -1067,6 +1243,40 @@ function contactFor(fr, side, i) {
 }
 const anyContact = fr => ['L', 'R'].some(side => FINGERS.some((_, i) => contactFor(fr, side, i)));
 
+// ── 奥行き（筆圧のような強弱） ──
+// 手がカメラに近いほど、画面に映る手のひらは大きくなる。記録全体の「いつもの大きさ」を基準に、
+// それより大きく映る（近い）ときは太く濃く、小さく映る（遠い）ときは細く薄くする
+function handScale(fr, side) {
+  const p = fr.palms?.[side];
+  if (!p || !p[0] || !p[3] || !p[2] || !p[5]) return null;
+  const ax = art.width / art.height; // 横と縦の縮尺をそろえる
+  // palms の並び：0=手首, 1=親指の付け根, 2=人差し指, 3=中指, 4=薬指, 5=小指の付け根
+  return Math.hypot((p[3].x - p[0].x) * ax, p[3].y - p[0].y) + Math.hypot((p[5].x - p[2].x) * ax, p[5].y - p[2].y);
+}
+let depthBase = { L: null, R: null };
+function updateDepthBase() {
+  for (const side of ['L', 'R']) {
+    const v = frames.map(f => handScale(f, side)).filter(Boolean).sort((a, b) => a - b);
+    depthBase[side] = v.length ? v[Math.floor(v.length / 2)] : null; // 真ん中の値（中央値）
+  }
+}
+const DEPTH_MAX_RATIO = 1.8;
+function depthFactorFor(fr, side) {
+  const sc = handScale(fr, side), base = depthBase[side];
+  if (!sc || !base) return 1;
+  const gain = settings.depthGain / 50; // 0〜2
+  // 近すぎると手が画面からはみ出して大きさが不安定になるので、いつもの 1.8 倍までしか見ない。太さも最大 2 倍まで
+  const ratio = Math.min(DEPTH_MAX_RATIO, sc / base);
+  return Math.min(2, Math.max(0.4, Math.pow(ratio, gain)));
+}
+
+// 触れている度合い k（0〜1）と奥行き dz（1 が基準）→ 太さと濃さの倍率
+function strokeFactors(k, dz) {
+  const f = contactFactors(k);
+  if (dz === undefined) return f;
+  return { w: f.w * dz, a: f.a * Math.min(1, Math.max(0.35, dz)) };
+}
+
 // 触れている度合い k（0〜1）→ 太さと濃さの倍率
 const CONTACT_OFF_WIDTH = 0.5; // 触れていないときの太さ（触れているときに対する割合）
 function contactFactors(k) {
@@ -1075,20 +1285,42 @@ function contactFactors(k) {
   return { w: CONTACT_OFF_WIDTH + (1 - CONTACT_OFF_WIDTH) * k, a: off + (1 - off) * k };
 }
 
+const MIN_SEG_POINTS = 3;
+const OUTLIER_DIST = 0.05; // 前後の点からこれ以上（画面の高さに対する割合）飛び出した1点は、見間違えとみなす
 function drawTrack(tr, fs, ctx) {
   const W = art.width, H = art.height;
+  // 1コマだけ前後から大きく飛び出した点は、見間違えとして、前後の真ん中に置き換える
+  const raw = fs.map(fr => { const p = tr.get(fr); return p ? { x: p.x * W, y: p.y * H } : null; });
+  const S = OUTLIER_DIST * H;
+  for (let i = 1; i + 1 < raw.length; i++) {
+    const a = raw[i - 1], p = raw[i], b = raw[i + 1];
+    if (!a || !p || !b) continue;
+    if (Math.hypot(p.x - a.x, p.y - a.y) > S && Math.hypot(p.x - b.x, p.y - b.y) > S && Math.hypot(a.x - b.x, a.y - b.y) < S * 0.6) {
+      raw[i] = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    }
+  }
   const segs = []; let cur = [];
-  for (const fr of fs) {
-    const p = tr.get(fr);
+  for (let n = 0; n < fs.length; n++) {
+    const fr = fs[n], p = raw[n];
     if (!p) { if (cur.length) { segs.push(cur); cur = []; } continue; }
-    const q = { x: p.x * W, y: p.y * H, t: fr.t };
+    const q = { x: p.x, y: p.y, t: fr.t };
     if (tr.finger && settings.contactMode !== 'off') q.k = contactFor(fr, tr.side, tr.i);
+    if (tr.finger && settings.depthGain > 0) q.dz = depthFactorFor(fr, tr.side);
     // 場面の切り替わりなどで位置が大きく飛んだら、線をつながない
     const last = cur[cur.length - 1];
     if (last && Math.hypot(q.x - last.x, q.y - last.y) / H > JUMP_BREAK * Math.max(1, (q.t - last.t) / 33)) { segs.push(cur); cur = []; }
     cur.push(q);
   }
   if (cur.length) segs.push(cur);
+  // 一瞬だけ見つかった点（MIN_SEG_POINTS コマ未満で途切れた線）は、見間違えのことが多いので描かない
+  for (let k = segs.length - 1; k >= 0; k--) if (segs[k].length < MIN_SEG_POINTS) segs.splice(k, 1);
+  // 奥行きは細かくブレるので、前後3コマでならす
+  if (tr.finger && settings.depthGain > 0) {
+    for (const pts of segs) {
+      const raw = pts.map(p => p.dz);
+      pts.forEach((p, j) => { const w = raw.slice(Math.max(0, j - 3), j + 4); p.dz = w.reduce((a, b) => a + b, 0) / w.length; });
+    }
+  }
   // 触れている・いないの切り替わりが急にならないよう、前後2コマでならす
   if (tr.finger && settings.contactMode !== 'off') {
     for (const pts of segs) {
@@ -1097,7 +1329,8 @@ function drawTrack(tr, fs, ctx) {
     }
   }
   ctx.strokeStyle = colorOf(tr.key);
-  for (const pts of segs) strokeSmooth(pts, ctx);
+  const widthMul = tr.finger ? fingerWidthMul(tr.i) : 1;
+  for (const pts of segs) strokeSmooth(pts, ctx, widthMul);
 }
 
 // 口は毎フレームの形を重ねて描く（形の変化が残像のように積み重なる）
@@ -1184,37 +1417,34 @@ function addClosedSmooth(ctx, pts) {
 }
 
 // 中点を通る二次ベジェで滑らかに。速いほど細く・薄く。
-function strokeSmooth(pts, ctx = artCtx) {
+const SPEED_SPAN = 3;
+function strokeSmooth(pts, ctx = artCtx, widthMul = 1) {
   if (pts.length === 1) {
-    const f = contactFactors(pts[0].k);
+    const f = strokeFactors(pts[0].k, pts[0].dz);
     ctx.save();
     ctx.globalAlpha = f.a;
     ctx.beginPath();
-    ctx.arc(pts[0].x, pts[0].y, brushWidth() / 2 * f.w, 0, Math.PI * 2);
+    ctx.arc(pts[0].x, pts[0].y, brushWidth() * widthMul / 2 * f.w, 0, Math.PI * 2);
     ctx.fillStyle = ctx.strokeStyle; ctx.fill();
     ctx.restore();
     return;
   }
-  // 区間ごとの速さ（画面の高さ／秒）。検出のブレでチラつかないよう前後をならす
+  // 各点の速さ（画面の高さ／秒）。1コマごとの移動だと、その場での小さな揺れまで「速い」と数えてしまうので、
+  // 前後 SPEED_SPAN コマ離れた位置どうしの移動で測る（揺れているだけなら、ほぼ 0 になる）
   const H = art.height;
-  const raw = pts.map((p, i) => {
-    if (i === 0) return 0;
-    const q = pts[i - 1], dt = Math.max(1, p.t - q.t) / 1000;
-    return Math.hypot(p.x - q.x, p.y - q.y) / H / dt;
+  const speeds = pts.map((p, i) => {
+    const a = pts[Math.max(0, i - SPEED_SPAN)], b = pts[Math.min(pts.length - 1, i + SPEED_SPAN)];
+    const dt = Math.max(1, b.t - a.t) / 1000;
+    return Math.hypot(b.x - a.x, b.y - a.y) / H / dt;
   });
-  raw[0] = raw[1];
-  const speeds = raw.map((_, i) => {
-    const w = raw.slice(Math.max(0, i - 2), i + 3);
-    return w.reduce((a, b) => a + b, 0) / w.length;
-  });
-  if (settings.brushMode) return strokeBrush(pts, speeds, ctx);
+  if (settings.brushMode) return strokeBrush(pts, speeds, ctx, widthMul);
   ctx.save();
   for (let i = 1; i < pts.length; i++) {
     const p0 = pts[i - 1], p1 = pts[i];
     const prevMid = i === 1 ? p0 : mid(pts[i - 2], p0);
     const nextMid = mid(p0, p1);
-    const f = contactFactors(p1.k);
-    ctx.lineWidth = Math.max(1, brushWidth() * speedToWidthRatio(speeds[i]) * f.w);
+    const f = strokeFactors(p1.k, p1.dz);
+    ctx.lineWidth = Math.max(1, brushWidth() * widthMul * speedToWidthRatio(speeds[i]) * f.w);
     ctx.globalAlpha = speedToAlpha(speeds[i]) * f.a;
     ctx.beginPath();
     ctx.moveTo(prevMid.x, prevMid.y);
@@ -1240,8 +1470,26 @@ function catmull(p0, p1, p2, p3, t) {
   return { x: f(p0.x, p1.x, p2.x, p3.x), y: f(p0.y, p1.y, p2.y, p3.y) };
 }
 
-function strokeBrush(pts, speeds, ctx) {
-  const maxW = brushWidth();
+const STILL_SMOOTH_SPEED = 0.15; // これより遅い（画面の高さ／秒）ほど、強くならす
+const STILL_SMOOTH_FRAMES = 6;   // 止まっているときに、前後何コマまでならすか
+function strokeBrush(pts, speeds, ctx, widthMul = 1) {
+  const maxW = brushWidth() * widthMul;
+  // 0) 指先の位置の小さなブレを、前後のコマでならす（太い線で角が目立たないように）。
+  //    止まっているときほど、手のわずかな揺れで線が小さく行き来して角ばった塊になるので、強くならす
+  //    （速いとき：前後1コマ　→　止まっているとき：前後 STILL_SMOOTH_FRAMES コマ）
+  const src = pts;
+  pts = src.map((p, i) => {
+    const still = Math.max(0, 1 - speeds[i] / STILL_SMOOTH_SPEED);
+    const rad = 1 + Math.round((STILL_SMOOTH_FRAMES - 1) * still);
+    let sx = 0, sy = 0, sw = 0;
+    for (let k = -rad; k <= rad; k++) {
+      const q = src[i + k];
+      if (!q) continue;
+      const w = rad + 1 - Math.abs(k);
+      sx += q.x * w; sy += q.y * w; sw += w;
+    }
+    return { ...p, x: sx / sw, y: sy / sw };
+  });
   // 1) 細かく補間した中心線（位置・速さ）
   const s = [];
   for (let i = 0; i < pts.length - 1; i++) {
@@ -1249,10 +1497,11 @@ function strokeBrush(pts, speeds, ctx) {
     for (let k = 0; k < BRUSH_STEPS; k++) {
       const t = k / BRUSH_STEPS;
       s.push({ ...catmull(p0, p1, p2, p3, t), v: speeds[i] + (speeds[i + 1] - speeds[i]) * t,
-               k: p1.k === undefined ? undefined : p1.k + (p2.k - p1.k) * t });
+               k: p1.k === undefined ? undefined : p1.k + (p2.k - p1.k) * t,
+               dz: p1.dz === undefined ? undefined : p1.dz + (p2.dz - p1.dz) * t });
     }
   }
-  s.push({ x: pts[pts.length - 1].x, y: pts[pts.length - 1].y, v: speeds[pts.length - 1], k: pts[pts.length - 1].k });
+  s.push({ x: pts[pts.length - 1].x, y: pts[pts.length - 1].y, v: speeds[pts.length - 1], k: pts[pts.length - 1].k, dz: pts[pts.length - 1].dz });
 
   // 2) 線の長さに沿った位置（入り・抜きに使う）
   let total = 0;
@@ -1261,23 +1510,32 @@ function strokeBrush(pts, speeds, ctx) {
 
   // 3) 各点の半径・濃さと、左右の縁
   s.forEach((p, j) => {
-    const f = contactFactors(p.k);
+    const f = strokeFactors(p.k, p.dz);
     let r = maxW / 2 * speedToWidthRatio(p.v) * f.w;
     if (taperLen > 0) {
       const edge = Math.min(p.d, total - p.d) / taperLen; // 端からの近さ 0〜1
       if (edge < 1) r *= BRUSH_TAPER_MIN + (1 - BRUSH_TAPER_MIN) * Math.sin(edge * Math.PI / 2);
     }
+    // 急に曲がる所では、帯がねじれない太さまで細くする（曲がりの半径より太いと、帯の内側が折り返して塊になる）
+    const a = s[Math.max(0, j - 2)], b = s[Math.min(s.length - 1, j + 2)];
+    const ab = Math.hypot(b.x - a.x, b.y - a.y), ap = Math.hypot(p.x - a.x, p.y - a.y), pb = Math.hypot(b.x - p.x, b.y - p.y);
+    const cross = Math.abs((p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x));
+    // （ほぼ止まっている所＝前後の点の間が筆の太さより短い所では、曲がりを測る意味がないので使わない）
+    if (cross > 1e-6 && ab > r) r = Math.min(r, 0.9 * ab * ap * pb / (2 * cross));
     r = Math.max(0.4, r);
     p.a = Math.round(speedToAlpha(p.v) * f.a / ALPHA_STEP) * ALPHA_STEP;
-    const a = s[Math.max(0, j - 1)], b = s[Math.min(s.length - 1, j + 1)];
     let nx = -(b.y - a.y), ny = b.x - a.x;
-    const len = Math.hypot(nx, ny) || 1;
-    nx /= len; ny /= len;
+    const len = Math.hypot(nx, ny);
+    if (len < 1e-6 && j > 0) { nx = s[j - 1].nx; ny = s[j - 1].ny; } // 進む向きが決まらない所は、前の点の向きを使う
+    else { nx /= len || 1; ny /= len || 1; }
+    // 帯の左右が前の点と入れ替わると、帯がねじれて内側が抜けるので、前の点と同じ側を向かせる
+    if (j > 0 && nx * s[j - 1].nx + ny * s[j - 1].ny < 0) { nx = -nx; ny = -ny; }
+    p.nx = nx; p.ny = ny;
     p.l = { x: p.x + nx * r, y: p.y + ny * r };
     p.r = { x: p.x - nx * r, y: p.y - ny * r };
   });
 
-  // 4) 濃さが同じ区間ごとに、帯の形を塗る
+  // 4) 濃さが同じ区間ごとに、帯の形を塗る（となりの区間とは縁を1本共有するだけなので、境目に粒が出ない）
   ctx.save();
   ctx.fillStyle = ctx.strokeStyle;
   let from = 0;
@@ -1285,12 +1543,32 @@ function strokeBrush(pts, speeds, ctx) {
     if (j < s.length && s[j].a === s[from].a) continue;
     const run = s.slice(from, Math.min(j + 1, s.length)); // 次の区間と1点重ねて隙間をなくす
     ctx.globalAlpha = s[from].a;
+    // 帯を「となり合う点どうしをつなぐ小さな四角」の集まりとして、すべて同じ向き（時計回り）で1つの形にまとめて塗る。
+    // 線が小さく輪を描いて自分に重なっても、重なった所が穴にならない（となりの四角とは辺を共有するだけなので、粒も出ない）
     ctx.beginPath();
-    ctx.moveTo(run[0].l.x, run[0].l.y);
-    for (const p of run) ctx.lineTo(p.l.x, p.l.y);
-    for (let k = run.length - 1; k >= 0; k--) ctx.lineTo(run[k].r.x, run[k].r.y);
-    ctx.closePath();
-    ctx.fill();
+    for (let k = 0; k + 1 < run.length; k++) {
+      const p = run[k], q = run[k + 1];
+      let c = [p.l, q.l, q.r, p.r];
+      let area = 0;
+      for (let m = 0; m < 4; m++) { const a = c[m], b = c[(m + 1) % 4]; area += a.x * b.y - b.x * a.y; }
+      if (area < 0) c = c.reverse();
+      ctx.moveTo(c[0].x, c[0].y);
+      for (let m = 1; m < 4; m++) ctx.lineTo(c[m].x, c[m].y);
+      ctx.closePath();
+    }
+    ctx.fill('nonzero');
+    // 止まっている所には、筆の太さの丸い墨溜まりを足す。
+    // 丸どうしは同じ向きで1つの形にまとめて塗る（帯とは別に塗るので、帯と重なっても穴にならない）
+    ctx.beginPath();
+    let pools = 0;
+    for (let k = 0; k < run.length; k++) {
+      const p = run[k];
+      if (p.v >= STILL_SMOOTH_SPEED) continue;
+      ctx.moveTo(p.x + p.r, p.y);
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      pools++;
+    }
+    if (pools) ctx.fill('nonzero');
     from = j;
   }
   ctx.restore();
@@ -1394,6 +1672,9 @@ const elShowFingerBones = document.getElementById('showFingerBones');
 const elBrushMode = document.getElementById('brushMode');
 const elMouthCount = document.getElementById('mouthCount'), elEyeCount = document.getElementById('eyeCount');
 const elEyeSize = document.getElementById('eyeSize');
+const elBgMode = document.getElementById('bgMode');
+const elIndexWidth = document.getElementById('indexWidth'), elFingerShow = document.getElementById('fingerShow');
+const elDepthGain = document.getElementById('depthGain'), elCheckHandShape = document.getElementById('checkHandShape');
 const elDrawMode = document.getElementById('drawMode'), elPhotoCount = document.getElementById('photoCount'), elPhotoAlpha = document.getElementById('photoAlpha');
 const elPhotoHands = document.getElementById('photoHands'), elPhotoObject = document.getElementById('photoObject');
 const elObjectClass = document.getElementById('objectClass');
@@ -1408,19 +1689,46 @@ elObjectClass.innerHTML = `<option value="${COLOR_CLASS}">色で選ぶ（粘土�
   `<option value="${TAP_CLASS}">タップして選ぶ（どんなものでも・動画のみ）</option>` +
   (SHOW_AUTO_CLASSES ? OBJECT_CLASSES.map((name, i) => i ? `<option value="${i}">${name}</option>` : '').join('') : '');
 const elArmAlpha = document.getElementById('armAlpha');
-try {
-  const saved = JSON.parse(localStorage.getItem('bodyStrokeSettings') || '{}');
-  Object.assign(settings, saved, { colors: { ...DEFAULT_COLORS, ...(saved.colors || {}) } });
-} catch {}
-// 前に選んでいた種類が、いまの選択肢にない（隠している）ときは「色で選ぶ」にする
-if (!AVAILABLE_CLASSES.includes(settings.objectClass)) settings.objectClass = COLOR_CLASS;
+// ── モード（習字／すべての設定） ──
+// 習字モードは、人差し指を筆にして書くためのもの。筆に関係する設定だけを出し、ほかは決まった値に固定する。
+// 設定はモードごとに別々に覚える（行き来しても、互いの設定が崩れない）
+const BASE_SETTINGS = JSON.parse(JSON.stringify(settings));
+const SHUJI_DEFAULTS = { brushPx: 10, widthVar: 0.7, contrast: 0.6, depthGain: 40 }; // 習字で最初に使う値（あとで変えられる）
+const SHUJI_FIXED = { // 習字では変えられない値
+  fingerShow: 'index', indexWidthMul: 1, brushMode: true, drawMode: 'lines',
+  showHuman: true, showArms: false, showLegs: false, showPalms: false, showFingerBones: false,
+  mouthCount: 0, eyeCount: 0, objectCount: 0, contactMode: 'off',
+};
+const SHUJI_VISIBLE = ['size', 'widthVar', 'contrast', 'depthGain', 'bgMode']; // 習字で出す設定
+const SHUJI_COLORS = ['index', 'background', 'background2'];                     // 習字で出す色
+const urlParams = new URLSearchParams(location.search);
+let mode = APP_MODE ? APP_MODE
+         : urlParams.has('shuji') || urlParams.get('mode') === 'shuji' ? 'shuji'
+         : urlParams.get('mode') === 'full' ? 'full'
+         : (() => { try { return localStorage.getItem('bodyStrokeMode') || 'full'; } catch { return 'full'; } })();
+const settingsKey = () => mode === 'shuji' ? 'bodyStrokeSettings_shuji' : 'bodyStrokeSettings';
+
+function loadSettings() {
+  for (const k of Object.keys(settings)) delete settings[k];
+  Object.assign(settings, JSON.parse(JSON.stringify(BASE_SETTINGS)), mode === 'shuji' ? SHUJI_DEFAULTS : {});
+  try {
+    const saved = JSON.parse(localStorage.getItem(settingsKey()) || '{}');
+    Object.assign(settings, saved, { colors: { ...DEFAULT_COLORS, ...(saved.colors || {}) } });
+  } catch {}
+  if (mode === 'shuji') Object.assign(settings, SHUJI_FIXED);
+  // 前に選んでいた種類が、いまの選択肢にない（隠している）ときは「色で選ぶ」にする
+  if (!AVAILABLE_CLASSES.includes(settings.objectClass)) settings.objectClass = COLOR_CLASS;
+}
+loadSettings();
 
 // 色ボタン（凡例の丸をクリックすると色を選べる）
 const elLegend = document.getElementById('legend');
 function buildLegend() {
-  elLegend.innerHTML = COLOR_LABELS.map(c =>
-    `<label><input type="color" data-key="${c.key}" value="${colorOf(c.key)}">${c.name}</label>`
-  ).join('') + '<button id="resetColors" type="button">色を元に戻す</button>';
+  elLegend.innerHTML = COLOR_LABELS.map(c => {
+    const shuji = SHUJI_COLORS.includes(c.key);
+    const name = mode === 'shuji' && c.key === 'index' ? '筆の色' : c.name;
+    return `<label${shuji ? ' class="shuji-show"' : ''}><input type="color" data-key="${c.key}" value="${colorOf(c.key)}">${name}</label>`;
+  }).join('') + '<button id="resetColors" type="button">色を元に戻す</button>';
   elLegend.querySelectorAll('input[type=color]').forEach(inp => {
     inp.oninput = () => { settings.colors[inp.dataset.key] = inp.value; onTune(); };
   });
@@ -1428,7 +1736,7 @@ function buildLegend() {
     settings.colors = { ...DEFAULT_COLORS }; buildLegend(); onTune();
   };
 }
-buildLegend();
+function syncUI() {
 elSize.value = settings.brushPx; elContrast.value = Math.round(settings.contrast * 100);
 elWidthVar.value = Math.round(settings.widthVar * 100);
 elShowArms.checked = settings.showArms;
@@ -1439,6 +1747,8 @@ elShowPalms.checked = settings.showPalms;
 elShowFingerBones.checked = settings.showFingerBones;
 elBrushMode.checked = settings.brushMode;
 elMouthCount.value = settings.mouthCount; elEyeCount.value = settings.eyeCount; elEyeSize.value = settings.eyePx;
+elIndexWidth.value = settings.indexWidthMul; elFingerShow.value = settings.fingerShow;
+elDepthGain.value = settings.depthGain; elCheckHandShape.checked = settings.checkHandShape;
 elDrawMode.value = settings.drawMode; elPhotoCount.value = settings.photoCount; elPhotoAlpha.value = settings.photoAlpha;
 elPhotoHands.checked = settings.photoHands; elPhotoObject.checked = settings.photoObject;
 elObjectClass.value = settings.objectClass; elObjectCount.value = settings.objectCount; elObjectLine.value = settings.objectLinePx;
@@ -1446,6 +1756,28 @@ elObjectSens.value = settings.objectSensitivity;
 elObjectStyle.value = settings.objectStyle; elObjectFillAlpha.value = settings.objectFillAlpha;
 elContactMode.value = settings.contactMode; elContactOff.value = settings.contactOffAlpha; elContactDist.value = settings.contactDist;
 elArmAlpha.value = Math.round(settings.armAlpha * 100);
+elBgMode.value = settings.bgMode;
+}
+
+function applyMode() {
+  document.body.classList.toggle('shuji', mode === 'shuji');
+  document.getElementById('title').textContent = mode === 'shuji' ? 'Air Shuji — 人差し指で書く習字' : 'Body Stroke — 指先で描く';
+  document.title = mode === 'shuji' ? 'Air Shuji' : 'Body Stroke';
+  document.querySelector('.mode-switch').hidden = !!APP_MODE; // モードが決まっているページでは、切り替えを出さない
+  document.querySelectorAll('.mode-switch button').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+  for (const id of SHUJI_VISIBLE) document.getElementById(id).closest('label').classList.add('shuji-show');
+  buildLegend();
+  syncUI();
+}
+document.querySelectorAll('.mode-switch button').forEach(b => b.onclick = () => {
+  if (b.dataset.mode === mode) return;
+  mode = b.dataset.mode;
+  try { localStorage.setItem('bodyStrokeMode', mode); } catch {}
+  loadSettings();
+  applyMode();
+  onTune();
+});
+applyMode();
 
 function onTune() {
   settings.brushPx = +elSize.value;
@@ -1461,6 +1793,13 @@ function onTune() {
   settings.mouthCount = +elMouthCount.value;
   settings.eyeCount = +elEyeCount.value;
   settings.eyePx = +elEyeSize.value;
+  settings.bgMode = elBgMode.value;
+  settings.indexWidthMul = +elIndexWidth.value;
+  settings.fingerShow = elFingerShow.value;
+  settings.depthGain = +elDepthGain.value;
+  settings.checkHandShape = elCheckHandShape.checked;
+  document.getElementById('depthGainVal').textContent = settings.depthGain ? settings.depthGain + '' : '使わない';
+  document.getElementById('indexWidthVal').textContent = '×' + settings.indexWidthMul;
   settings.drawMode = elDrawMode.value;
   settings.photoCount = +elPhotoCount.value;
   settings.photoAlpha = +elPhotoAlpha.value;
@@ -1487,14 +1826,16 @@ function onTune() {
   document.getElementById('eyeCountVal').textContent = settings.eyeCount ? settings.eyeCount + '回' : '描かない';
   settings.armAlpha = +elArmAlpha.value / 100;
   elSizeVal.textContent = settings.brushPx + 'px';
-  try { localStorage.setItem('bodyStrokeSettings', JSON.stringify(settings)); } catch {}
+  if (mode === 'shuji') Object.assign(settings, SHUJI_FIXED); // 習字で固定する値は、隠れた設定から変わらないように
+  try { localStorage.setItem(settingsKey(), JSON.stringify(settings)); } catch {}
   // 記録済みの絵があれば、その場で描き直す（記録中はライブ描画に任せる）
   if (phase === 'idle') {
     if (frames.length) drawStrokes(frames);
     else clearArt();
   }
 }
-elSize.oninput = onTune; elContrast.oninput = onTune; elWidthVar.oninput = onTune; elShowArms.onchange = onTune; elShowHuman.onchange = onTune; elVerifyHuman.onchange = onTune; elShowLegs.onchange = onTune; elShowPalms.onchange = onTune; elShowFingerBones.onchange = onTune; elBrushMode.onchange = onTune; elMouthCount.oninput = onTune; elEyeCount.oninput = onTune; elEyeSize.oninput = onTune;
+elSize.oninput = onTune; elContrast.oninput = onTune; elWidthVar.oninput = onTune; elShowArms.onchange = onTune; elShowHuman.onchange = onTune; elVerifyHuman.onchange = onTune; elShowLegs.onchange = onTune; elShowPalms.onchange = onTune; elShowFingerBones.onchange = onTune; elBrushMode.onchange = onTune; elMouthCount.oninput = onTune; elEyeCount.oninput = onTune; elEyeSize.oninput = onTune; elBgMode.onchange = onTune; elIndexWidth.oninput = onTune; elFingerShow.onchange = onTune;
+elDepthGain.oninput = onTune; elCheckHandShape.onchange = onTune;
 elPhotoAlpha.oninput = onTune;
 // 写真の作り直しが必要な設定（枚数・写すもの・描き方）
 for (const el of [elDrawMode, elPhotoCount, elPhotoHands, elPhotoObject]) {
@@ -1955,7 +2296,7 @@ async function analyzeVideo(start, end) {
   end = Math.min(end, dur);
 
   phase = 'analyzing';
-  frames = []; liveSpeed.L = liveSpeed.R = null;
+  frames = []; liveSpeed.L = liveSpeed.R = null; rejectedHands = 0;
   recDurationMs = (end - start) * 1000;
   clearArt();
 
@@ -2002,7 +2343,8 @@ async function analyzeVideo(start, end) {
   const faceN = frames.filter(f => f.face).length;
   const armN  = frames.filter(f => f.arms?.some(Boolean)).length;
   const touchN = frames.filter(anyContact).length;
-  elStatus.textContent = `動画の解析完了：${frames.length} フレーム（手 ${handN} ／ 顔 ${faceN} ／ 肩・腕 ${armN} ／ 物に触れている ${touchN}）— 「記録スタート」でカメラに戻ります`;
+  const rejN = settings.checkHandShape ? ` ／ 形がおかしい手を捨てた ${rejectedHands}` : '';
+  elStatus.textContent = `動画の解析完了：${frames.length} フレーム（手 ${handN} ／ 顔 ${faceN} ／ 肩・腕 ${armN} ／ 物に触れている ${touchN}${rejN}）— 「記録スタート」でカメラに戻ります`;
   setButtons(true);
   // 解析の途中で「輪郭を取るもの」を変えていたら、新しい種類で輪郭だけ取り直す
   if (settings.objectClass !== objectCls && !isTapLike(settings.objectClass)) await resegmentVideo(settings.objectClass);
