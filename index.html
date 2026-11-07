@@ -65,6 +65,23 @@
   .tune { margin-top: 12px; display: flex; gap: 22px; flex-wrap: wrap; justify-content: center;
           padding: 10px 16px; border-radius: 10px; background: #1a1e27; }
   .tune label { gap: 8px; }
+  /* ゾーン（全体／人／物体）：見出しを押すと開け閉めできる */
+  .tune { flex-direction: column; align-items: stretch; gap: 10px; width: min(980px, 100%); }
+  .zone { border: 1px solid rgba(255,255,255,.12); border-radius: 8px; }
+  .zone > summary { cursor: pointer; padding: 10px 14px; font-weight: bold; font-size: 14px; list-style-position: inside; }
+  .zone-body { display: flex; flex-wrap: wrap; gap: 12px 22px; align-items: center; padding: 2px 14px 14px; }
+  .zone-sub { flex-basis: 100%; font-size: 12px; color: #9ca3af; border-top: 1px solid rgba(255,255,255,.08); padding-top: 8px; margin-top: 2px; }
+  .zone-colors { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 10px 14px; font-size: 13px; }
+  .zone-colors:empty { display: none; }
+  .zone-colors label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+  .zone-colors input[type=color] {
+    -webkit-appearance: none; appearance: none; width: 22px; height: 22px; padding: 0;
+    border: 2px solid rgba(255,255,255,.35); border-radius: 50%; background: none; cursor: pointer;
+  }
+  .zone-colors input[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
+  .zone-colors input[type=color]::-webkit-color-swatch { border: none; border-radius: 50%; }
+  .zone-colors button { font-size: 12px; padding: 4px 10px; }
+  .legend:empty { display: none; }
   .tune input[type=range] { width: 150px; }
   .tune .val { min-width: 3.2em; color: #fff; font-variant-numeric: tabular-nums; }
   .tune small { color: #9ca3af; }
@@ -84,7 +101,8 @@
     .tune input[type=checkbox] { width: 20px; height: 20px; margin: 0; }
     .tune label:has(input[type=checkbox]) { justify-content: flex-start; }
     .legend { gap: 10px 14px; }
-    .legend input[type=color] { width: 28px; height: 28px; }
+    .legend input[type=color], .zone-colors input[type=color] { width: 28px; height: 28px; }
+    .zone-body { flex-direction: column; align-items: stretch; gap: 14px; }
   }
 </style>
 </head>
@@ -131,6 +149,10 @@
   </div>
 </div>
 <div class="tune">
+<details class="zone" data-zone="all" open>
+  <summary>全体（背景・描き方）</summary>
+  <div class="zone-body">
+  <div class="zone-colors" id="colors-all"></div>
   <label>背景
     <select id="bgMode">
       <option value="solid">単色</option>
@@ -147,6 +169,7 @@
       <option value="both">両方（写真の上に線）</option>
     </select>
   </label>
+  <div class="zone-sub">連続写真（描き方が「連続写真」「両方」のとき）</div>
   <label>連続写真の枚数
     <input id="photoCount" type="range" min="2" max="40" step="1" value="12">
     <span class="val" id="photoCountVal"></span>
@@ -157,42 +180,54 @@
   </label>
   <label><input id="photoHands" type="checkbox" checked> 手（人）を写す</label>
   <label><input id="photoObject" type="checkbox" checked> 物を写す</label>
+  </div>
+</details>
+<details class="zone" data-zone="human" open>
+  <summary>人（体・手）</summary>
+  <div class="zone-body">
+  <div class="zone-colors" id="colors-human"></div>
+  <label><input id="showHuman" type="checkbox" checked> 人の線を描く（外すと物体の輪郭だけ）</label>
+  <div class="zone-sub">筆（指先の線）</div>
+  <label><input id="brushMode" type="checkbox" checked> 筆のように描く（入り・抜き）</label>
   <label><span class="full-only">指先の点の大きさ</span><span class="shuji-only">筆の太さ</span><small>（ゆっくり時）</small>
     <input id="size" type="range" min="1" max="30" step="0.5" value="6">
     <span class="val" id="sizeVal"></span>
-  </label>
-  <label>人差し指の太さ
-    <input id="indexWidth" type="range" min="0.5" max="5" step="0.25" value="1">
-    <span class="val" id="indexWidthVal"></span>
-  </label>
-  <label>奥行きの効き<small>（近いと太く）</small>
-    <input id="depthGain" type="range" min="0" max="100" step="5" value="0">
-    <span class="val" id="depthGainVal"></span>
-  </label>
-  <label><input id="checkHandShape" type="checkbox" checked> 手の形の確認（ありえない形の手を捨てる）</label>
-  <label>指先の線
-    <select id="fingerShow">
-      <option value="all">5本すべて</option>
-      <option value="index">人差し指だけ</option>
-    </select>
   </label>
   <label>太さの変化
     <small>弱い</small>
     <input id="widthVar" type="range" min="0" max="100" value="70">
     <small>強い</small>
   </label>
-  <label>濃淡調整
+  <label>濃淡調整<small>（指先・骨組み・顔）</small>
     <small>弱い</small>
     <input id="contrast" type="range" min="0" max="100" value="80">
     <small>強い</small>
   </label>
-  <label><input id="showHuman" type="checkbox" checked> 人の線を描く（外すと物体の輪郭だけ）</label>
-  <label><input id="verifyHuman" type="checkbox" checked> 人の確認（人の範囲にある顔・体だけを人として使う）</label>
+  <label>奥行きの効き<small>（近いと太く）</small>
+    <input id="depthGain" type="range" min="0" max="100" step="5" value="0">
+    <span class="val" id="depthGainVal"></span>
+  </label>
+  <label>指先の線
+    <select id="fingerShow">
+      <option value="all">5本すべて</option>
+      <option value="index">人差し指だけ</option>
+    </select>
+  </label>
+  <label>人差し指の太さ
+    <input id="indexWidth" type="range" min="0.5" max="5" step="0.25" value="1">
+    <span class="val" id="indexWidthVal"></span>
+  </label>
+  <div class="zone-sub">骨組み</div>
   <label><input id="showArms" type="checkbox" checked> 肩・腕も描く</label>
   <label><input id="showLegs" type="checkbox" checked> 腰・脚・足も描く（全身）</label>
   <label><input id="showPalms" type="checkbox" checked> 手のひらも描く</label>
   <label><input id="showFingerBones" type="checkbox" checked> 指の骨組みも描く</label>
-  <label><input id="brushMode" type="checkbox" checked> 筆のように描く（入り・抜き）</label>
+  <label>体の骨組みの濃さ
+    <small>薄い</small>
+    <input id="armAlpha" type="range" min="5" max="100" value="35">
+    <small>濃い</small>
+  </label>
+  <div class="zone-sub">顔</div>
   <label>口の数
     <input id="mouthCount" type="range" min="0" max="30" step="1" value="4">
     <span class="val" id="mouthCountVal"></span>
@@ -205,6 +240,16 @@
     <input id="eyeSize" type="range" min="1" max="20" step="0.5" value="3">
     <span class="val" id="eyeSizeVal"></span>
   </label>
+  <div class="zone-sub">見間違いを減らす</div>
+  <label><input id="verifyHuman" type="checkbox" checked> 人の確認（人の範囲にある顔・体だけを人として使う）</label>
+  <label><input id="checkHandShape" type="checkbox" checked> 手の形の確認（ありえない形の手を捨てる）</label>
+  </div>
+</details>
+<details class="zone" data-zone="object">
+  <summary>物体（素材・動物）</summary>
+  <div class="zone-body">
+  <div class="zone-colors" id="colors-object"></div>
+  <div class="zone-sub">輪郭</div>
   <label>輪郭を取るもの
     <select id="objectClass"></select>
   </label>
@@ -216,6 +261,11 @@
     <small>低い</small>
     <input id="objectSens" type="range" min="5" max="95" step="5" value="50">
     <small>高い</small>
+  </label>
+  <label>輪郭の濃淡調整<small>（動きによる）</small>
+    <small>弱い</small>
+    <input id="objectContrast" type="range" min="0" max="100" value="80">
+    <small>強い</small>
   </label>
   <label>輪郭の描き方
     <select id="objectStyle">
@@ -232,6 +282,7 @@
     <input id="objectLine" type="range" min="0.5" max="10" step="0.5" value="1.5">
     <span class="val" id="objectLineVal"></span>
   </label>
+  <div class="zone-sub">触れているとき</div>
   <label>触れているときの線
     <select id="contactMode">
       <option value="off">変えない</option>
@@ -247,11 +298,8 @@
     <input id="contactDist" type="range" min="0" max="10" step="0.5" value="3">
     <span class="val" id="contactDistVal"></span>
   </label>
-  <label>体の骨組みの濃さ
-    <small>薄い</small>
-    <input id="armAlpha" type="range" min="5" max="100" value="35">
-    <small>濃い</small>
-  </label>
+  </div>
+</details>
 </div>
 <div id="status">MediaPipe 読み込み中…</div>
 
@@ -389,7 +437,7 @@ const SPEED_FAST  = 1.2;   // これ以上は「瞬間的な動き」→ いち�
 //  brushPx  : 指先の点の大きさ（画面上の px。描画キャンバスは2倍の解像度なので内部では ×2）
 //  widthVar : 太さの変化 0〜1（0=変化なし、1=すばやい動きは 1割の太さまで細くなる）
 //  contrast : 濃淡の強さ 0〜1（0=濃淡なし、1=すばやい動きはほぼ消える）
-const settings = { brushPx: 6, widthVar: 0.7, contrast: 0.8, showHuman: true, verifyHuman: true, showArms: true, showLegs: true, showPalms: true, showFingerBones: true, brushMode: true, bgMode: 'solid', indexWidthMul: 1, fingerShow: 'all', depthGain: 0, checkHandShape: true, drawMode: 'lines', photoCount: 12, photoAlpha: 30, photoHands: true, photoObject: true, mouthCount: 4, eyeCount: 4, eyePx: 3, objectClass: COLOR_CLASS, objectCount: 0, objectSensitivity: 50, objectLinePx: 1.5, objectStyle: 'line', objectFillAlpha: 40, contactMode: 'off', contactOffAlpha: 20, contactDist: 3, armAlpha: 0.35, colors: { ...DEFAULT_COLORS } };
+const settings = { brushPx: 6, widthVar: 0.7, contrast: 0.8, showHuman: true, verifyHuman: true, showArms: true, showLegs: true, showPalms: true, showFingerBones: true, brushMode: true, bgMode: 'solid', indexWidthMul: 1, fingerShow: 'all', depthGain: 0, checkHandShape: true, drawMode: 'lines', photoCount: 12, photoAlpha: 30, photoHands: true, photoObject: true, mouthCount: 4, eyeCount: 4, eyePx: 3, objectClass: COLOR_CLASS, objectCount: 0, objectSensitivity: 50, objectContrast: 0.8, objectLinePx: 1.5, objectStyle: 'line', objectFillAlpha: 40, contactMode: 'off', contactOffAlpha: 20, contactDist: 3, armAlpha: 0.35, colors: { ...DEFAULT_COLORS } };
 const colorOf = key => settings.colors[key] || DEFAULT_COLORS[key];
 
 // 速さ → 太さ：ゆっくりほど太く（= brushPx）、すばやいほど細く
@@ -404,8 +452,9 @@ function speedRatio(v) {
   return Math.min(1, Math.max(0, (v - SPEED_STILL) / (SPEED_FAST - SPEED_STILL)));
 }
 // max: 止まっているときの濃さ。濃淡が強いほど、速いときに 0.03 まで下がる
-function speedToAlpha(v, max = 1) {
-  const min = max - (max - 0.03) * settings.contrast;
+// contrast を渡すと、その強さで計算する（物体の輪郭は、人とは別の「輪郭の濃淡調整」を使う）
+function speedToAlpha(v, max = 1, contrast = settings.contrast) {
+  const min = max - (max - 0.03) * contrast;
   return max - (max - min) * speedRatio(v);
 }
 const COUNTDOWN_SEC = 3;
@@ -891,7 +940,7 @@ function drawObjects(fs) {
     if (pickNow(fr)) {
       // 形の中心の動く速さ（画面の高さ／秒）
       const v = prev ? Math.hypot((c.x - prev.c.x) * W / H, c.y - prev.c.y) / (Math.max(1, fr.t - prev.t) / 1000) : 0;
-      const a = speedToAlpha(v, 0.9);
+      const a = speedToAlpha(v, 0.9, settings.objectContrast);
       // すべての輪郭を1つの形にまとめる（穴になっている内側の輪郭は、evenodd で抜ける）
       artCtx.beginPath();
       for (const ring of rings) addClosedSmooth(artCtx, ring.map(p => ({ x: p.x * W, y: p.y * H })));
@@ -1287,23 +1336,23 @@ function contactFactors(k) {
 
 const MIN_SEG_POINTS = 3;
 const OUTLIER_DIST = 0.05; // 前後の点からこれ以上（画面の高さに対する割合）飛び出した1点は、見間違えとみなす
-function drawTrack(tr, fs, ctx) {
-  const W = art.width, H = art.height;
+// 1本の軌跡を、線にする区間（点の並び）に分ける。W・H は座標の縮尺（画面に描くときはキャンバスの大きさ）
+function buildSegments(tr, fs, W, H) {
   // 1コマだけ前後から大きく飛び出した点は、見間違えとして、前後の真ん中に置き換える
-  const raw = fs.map(fr => { const p = tr.get(fr); return p ? { x: p.x * W, y: p.y * H } : null; });
+  const raw = fs.map(fr => { const p = tr.get(fr); return p ? { x: p.x * W, y: p.y * H, z: p.z || 0 } : null; });
   const S = OUTLIER_DIST * H;
   for (let i = 1; i + 1 < raw.length; i++) {
     const a = raw[i - 1], p = raw[i], b = raw[i + 1];
     if (!a || !p || !b) continue;
     if (Math.hypot(p.x - a.x, p.y - a.y) > S && Math.hypot(p.x - b.x, p.y - b.y) > S && Math.hypot(a.x - b.x, a.y - b.y) < S * 0.6) {
-      raw[i] = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      raw[i] = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
     }
   }
   const segs = []; let cur = [];
   for (let n = 0; n < fs.length; n++) {
     const fr = fs[n], p = raw[n];
     if (!p) { if (cur.length) { segs.push(cur); cur = []; } continue; }
-    const q = { x: p.x, y: p.y, t: fr.t };
+    const q = { x: p.x, y: p.y, z: p.z, t: fr.t, fr };
     if (tr.finger && settings.contactMode !== 'off') q.k = contactFor(fr, tr.side, tr.i);
     if (tr.finger && settings.depthGain > 0) q.dz = depthFactorFor(fr, tr.side);
     // 場面の切り替わりなどで位置が大きく飛んだら、線をつながない
@@ -1314,6 +1363,12 @@ function drawTrack(tr, fs, ctx) {
   if (cur.length) segs.push(cur);
   // 一瞬だけ見つかった点（MIN_SEG_POINTS コマ未満で途切れた線）は、見間違えのことが多いので描かない
   for (let k = segs.length - 1; k >= 0; k--) if (segs[k].length < MIN_SEG_POINTS) segs.splice(k, 1);
+  return segs;
+}
+
+function drawTrack(tr, fs, ctx) {
+  const W = art.width, H = art.height;
+  const segs = buildSegments(tr, fs, W, H);
   // 奥行きは細かくブレるので、前後3コマでならす
   if (tr.finger && settings.depthGain > 0) {
     for (const pts of segs) {
@@ -1680,6 +1735,7 @@ const elPhotoHands = document.getElementById('photoHands'), elPhotoObject = docu
 const elObjectClass = document.getElementById('objectClass');
 const elObjectCount = document.getElementById('objectCount'), elObjectLine = document.getElementById('objectLine');
 const elObjectSens = document.getElementById('objectSens');
+const elObjectContrast = document.getElementById('objectContrast');
 const elObjectStyle = document.getElementById('objectStyle'), elObjectFillAlpha = document.getElementById('objectFillAlpha');
 const elContactMode = document.getElementById('contactMode'), elContactOff = document.getElementById('contactOff'), elContactDist = document.getElementById('contactDist');
 // 犬など DeepLab の種類から選ぶ選択肢は、まだ調整中なので普段は隠す（URL の最後に ?all を付けると出る）
@@ -1714,6 +1770,8 @@ function loadSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(settingsKey()) || '{}');
     Object.assign(settings, saved, { colors: { ...DEFAULT_COLORS, ...(saved.colors || {}) } });
+    // 物体の濃淡を分ける前の設定なら、人の濃淡と同じ値から始める（見た目が急に変わらないように）
+    if (saved.objectContrast === undefined && saved.contrast !== undefined) settings.objectContrast = saved.contrast;
   } catch {}
   if (mode === 'shuji') Object.assign(settings, SHUJI_FIXED);
   // 前に選んでいた種類が、いまの選択肢にない（隠している）ときは「色で選ぶ」にする
@@ -1723,19 +1781,38 @@ loadSettings();
 
 // 色ボタン（凡例の丸をクリックすると色を選べる）
 const elLegend = document.getElementById('legend');
+// 色の丸は、それぞれのゾーンの中に置く（背景の色は「全体」、物体の輪郭の色は「物体」、ほかは「人」）
+const COLOR_ZONE = { background: 'all', background2: 'all', object: 'object' };
 function buildLegend() {
-  elLegend.innerHTML = COLOR_LABELS.map(c => {
+  const html = { all: '', human: '', object: '' };
+  for (const c of COLOR_LABELS) {
     const shuji = SHUJI_COLORS.includes(c.key);
     const name = mode === 'shuji' && c.key === 'index' ? '筆の色' : c.name;
-    return `<label${shuji ? ' class="shuji-show"' : ''}><input type="color" data-key="${c.key}" value="${colorOf(c.key)}">${name}</label>`;
-  }).join('') + '<button id="resetColors" type="button">色を元に戻す</button>';
-  elLegend.querySelectorAll('input[type=color]').forEach(inp => {
+    html[COLOR_ZONE[c.key] || 'human'] += `<label${shuji ? ' class="shuji-show"' : ''}><input type="color" data-key="${c.key}" value="${colorOf(c.key)}">${name}</label>`;
+  }
+  html.all += '<button id="resetColors" type="button">色を元に戻す</button>';
+  for (const z of ['all', 'human', 'object']) document.getElementById('colors-' + z).innerHTML = html[z];
+  elLegend.innerHTML = '';
+  document.querySelectorAll('.zone-colors input[type=color]').forEach(inp => {
     inp.oninput = () => { settings.colors[inp.dataset.key] = inp.value; onTune(); };
   });
   document.getElementById('resetColors').onclick = () => {
     settings.colors = { ...DEFAULT_COLORS }; buildLegend(); onTune();
   };
 }
+// ゾーンの開け閉めを覚えておく
+(() => {
+  let open = {};
+  try { open = JSON.parse(localStorage.getItem('bodyStrokeZones') || '{}'); } catch {}
+  document.querySelectorAll('.zone').forEach(z => {
+    if (z.dataset.zone in open) z.open = open[z.dataset.zone];
+    z.addEventListener('toggle', () => {
+      open[z.dataset.zone] = z.open;
+      try { localStorage.setItem('bodyStrokeZones', JSON.stringify(open)); } catch {}
+    });
+  });
+})();
+
 function syncUI() {
 elSize.value = settings.brushPx; elContrast.value = Math.round(settings.contrast * 100);
 elWidthVar.value = Math.round(settings.widthVar * 100);
@@ -1753,6 +1830,7 @@ elDrawMode.value = settings.drawMode; elPhotoCount.value = settings.photoCount; 
 elPhotoHands.checked = settings.photoHands; elPhotoObject.checked = settings.photoObject;
 elObjectClass.value = settings.objectClass; elObjectCount.value = settings.objectCount; elObjectLine.value = settings.objectLinePx;
 elObjectSens.value = settings.objectSensitivity;
+elObjectContrast.value = Math.round(settings.objectContrast * 100);
 elObjectStyle.value = settings.objectStyle; elObjectFillAlpha.value = settings.objectFillAlpha;
 elContactMode.value = settings.contactMode; elContactOff.value = settings.contactOffAlpha; elContactDist.value = settings.contactDist;
 elArmAlpha.value = Math.round(settings.armAlpha * 100);
@@ -1811,6 +1889,7 @@ function onTune() {
   settings.objectCount = +elObjectCount.value;
   settings.objectLinePx = +elObjectLine.value;
   settings.objectSensitivity = +elObjectSens.value;
+  settings.objectContrast = +elObjectContrast.value / 100;
   settings.objectStyle = elObjectStyle.value;
   settings.objectFillAlpha = +elObjectFillAlpha.value;
   document.getElementById('objectFillAlphaVal').textContent = settings.objectFillAlpha + '%';
@@ -1858,7 +1937,7 @@ elObjectClass.onchange = () => {
       : `記録したときは「${objectClassName(recorded)}」の輪郭を取っています。種類を変えたときは、もう一度記録してください`;
   }
 };
-elObjectCount.oninput = onTune; elObjectLine.oninput = onTune; elObjectSens.oninput = onTune;
+elObjectCount.oninput = onTune; elObjectLine.oninput = onTune; elObjectSens.oninput = onTune; elObjectContrast.oninput = onTune;
 elObjectStyle.onchange = onTune; elObjectFillAlpha.oninput = onTune;
 elContactMode.onchange = onTune; elContactOff.oninput = onTune; elContactDist.oninput = onTune; elArmAlpha.oninput = onTune;
 onTune();
